@@ -33,7 +33,7 @@ data class UiState(
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val session = Session(app)
-    private val api = buildApi(session)
+    private val api = LocalBackend(java.io.File(app.filesDir, "oneclick-db.json"), { session.token }, { session.mode })
     private val _s = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _s
     private var poller: Job? = null
@@ -73,7 +73,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     val me = api.me()
                     _s.update { it.copy(active = a, me = me) }
                 }
-                delay(3000)
+                delay(1000)
             }
         }
     }
@@ -128,14 +128,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         toast(api.sos(SosReq(a?.id, a?.customerLat ?: DEMO_LAT, a?.customerLng ?: DEMO_LNG)).message ?: "SOS sent")
     }
 
+    fun resetDemo() { api.resetDemo(); logout() }
+
     fun toast(m: String) = _s.update { it.copy(message = m) }
     fun clearMessage() = _s.update { it.copy(message = null) }
 
     private fun run(block: suspend () -> Unit) = viewModelScope.launch {
         _s.update { it.copy(busy = true) }
-        try { block() } catch (e: Exception) {
-            if (e is retrofit2.HttpException && e.code() == 401 && session.token != null) logout() else toast(e.userMessage())
-        }
+        try { block() } catch (e: Exception) { toast(e.userMessage()) }
         _s.update { it.copy(busy = false) }
     }
 }

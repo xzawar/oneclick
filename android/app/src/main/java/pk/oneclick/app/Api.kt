@@ -7,13 +7,6 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNamingStrategy
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import retrofit2.HttpException
-import retrofit2.Retrofit
-import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
@@ -45,7 +38,8 @@ import retrofit2.http.Query
     val otherRating: Double? = null, val customerLat: Double, val customerLng: Double,
     val providerLat: Double, val providerLng: Double, val etaMin: Int? = null,
     val awaitingConfirmation: Boolean = false, val needsRating: Boolean = false,
-    val cancelReason: String? = null, val expiresInS: Int? = null, val createdAt: String = "",
+    val cancelReason: String? = null, val completionPhotoUrl: String? = null,
+    val expiresInS: Int? = null, val createdAt: String = "",
 )
 @Serializable data class BookingRes(val booking: BookingDto? = null)
 @Serializable data class BookingsRes(val bookings: List<BookingDto>)
@@ -95,7 +89,7 @@ interface ApiService {
 
 enum class ActiveMode { CUSTOMER, PROVIDER }
 
-/** Token kept in EncryptedSharedPreferences (Android Keystore-backed master key). */
+/** Session (signed-in user id) kept in EncryptedSharedPreferences (Android Keystore-backed master key). */
 class Session(ctx: Context) {
     private val prefs = EncryptedSharedPreferences.create(
         ctx, "session",
@@ -112,24 +106,6 @@ class Session(ctx: Context) {
 @OptIn(ExperimentalSerializationApi::class)
 val json = Json { namingStrategy = JsonNamingStrategy.SnakeCase; ignoreUnknownKeys = true; explicitNulls = false }
 
-fun buildApi(session: Session): ApiService {
-    val client = OkHttpClient.Builder().addInterceptor { chain ->
-        val r = chain.request().newBuilder().header("X-Active-Mode", session.mode.name)
-        session.token?.let { r.header("Authorization", "Bearer $it") }
-        chain.proceed(r.build())
-    }.build()
-    return Retrofit.Builder().baseUrl(BuildConfig.API_BASE_URL).client(client)
-        .addConverterFactory(json.asConverterFactory("application/json".toMediaType())).build()
-        .create(ApiService::class.java)
-}
-
-/** Server error body is { "error": { "code", "message" } }. */
-fun Throwable.userMessage(): String = when (this) {
-    is HttpException -> runCatching {
-        json.parseToJsonElement(response()?.errorBody()?.string() ?: "").jsonObject["error"]!!
-            .jsonObject["message"]!!.jsonPrimitive.content
-    }.getOrElse { "Server error (${code()})" }
-    else -> "No connection. Check internet."
-}
+fun Throwable.userMessage(): String = if (this is AppError) message ?: "Error" else "Something went wrong"
 
 fun rs(amount: Long) = "Rs. " + "%,d".format(amount)

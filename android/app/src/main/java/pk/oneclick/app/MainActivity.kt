@@ -2,7 +2,15 @@ package pk.oneclick.app
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import java.io.File
 import androidx.activity.viewModels
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -206,7 +214,7 @@ fun CustomerMap(s: UiState, vm: AppViewModel) {
                 Text("⭐ ${p.ratingAvg} (${p.totalJobs} jobs)  ·  📍 ${p.distanceKm} km  ·  ${p.tier.uppercase()}")
                 Spacer(Modifier.height(16.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton({ vm.toast("In-app calling (Agora) is not in this demo") }, Modifier.weight(1f)) {
+                    OutlinedButton({ vm.toast("In-app calling needs an Agora App ID (add key to enable)") }, Modifier.weight(1f)) {
                         Icon(Icons.Default.Call, null); Spacer(Modifier.width(6.dp)); Text("Call")
                     }
                     Button({ booking = p; selected = null }, Modifier.weight(1f), enabled = s.active == null) { Text("Book") }
@@ -240,6 +248,14 @@ fun BookDialog(p: ProviderDto, s: UiState, onDismiss: () -> Unit, onSend: (Strin
 fun ActiveBookingPanel(a: BookingDto, s: UiState, vm: AppViewModel, modifier: Modifier = Modifier) {
     val customer = a.mySide == "customer"
     var dispute by remember { mutableStateOf(false) }
+    val ctx = LocalContext.current
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
+        if (bmp == null) vm.toast("Photo proof is required to complete") else {
+            val f = File(ctx.filesDir, "proof_${a.id}.jpg")
+            f.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }
+            vm.act({ complete(it, CompleteReq(f.absolutePath)) }, "Photo proof uploaded")
+        }
+    }
     Card(modifier.fillMaxWidth().padding(12.dp), shape = RoundedCornerShape(16.dp), elevation = CardDefaults.cardElevation(8.dp)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -264,6 +280,12 @@ fun ActiveBookingPanel(a: BookingDto, s: UiState, vm: AppViewModel, modifier: Mo
                 else -> ""
             }
             Text(info)
+            val photo = a.completionPhotoUrl?.takeIf { a.awaitingConfirmation || a.needsRating }
+            if (photo != null) {
+                val bmp = remember(photo) { if (File(photo).exists()) BitmapFactory.decodeFile(photo) else null }
+                if (bmp != null) Image(bmp.asImageBitmap(), "Photo proof", Modifier.fillMaxWidth().height(140.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop)
+                else Text("📷 Photo proof attached by provider", fontSize = 13.sp, color = C.Gray)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (customer) {
                     if (a.status in listOf("pending", "accepted", "en_route")) OutlinedButton({ vm.act({ cancel(it) }, "Booking cancelled") }) { Text("Cancel") }
@@ -275,7 +297,9 @@ fun ActiveBookingPanel(a: BookingDto, s: UiState, vm: AppViewModel, modifier: Mo
                         a.status == "en_route" -> Button({ vm.act({ status(it, StatusReq("arrived")) }) }) { Text("Mark arrived") }
                         a.status == "arrived" -> Button({ vm.act({ status(it, StatusReq("in_progress")) }) }) { Text("Start job") }
                         a.status == "in_progress" && !a.awaitingConfirmation ->
-                            Button({ vm.act({ complete(it, CompleteReq("demo://photo-proof/${a.id}")) }, "Photo proof uploaded") }, colors = ButtonDefaults.buttonColors(C.Green)) {
+                            Button({
+                                try { camera.launch(null) } catch (e: Exception) { vm.toast("No camera app found") }
+                            }, colors = ButtonDefaults.buttonColors(C.Green)) {
                                 Icon(Icons.Default.PhotoCamera, null); Spacer(Modifier.width(6.dp)); Text("Photo proof & complete")
                             }
                     }
@@ -440,7 +464,8 @@ fun ProfileScreen(s: UiState, vm: AppViewModel) {
             if (p.isVerified) Pill("VERIFIED (CNIC + selfie)", C.DarkBlue)
         }
         Spacer(Modifier.weight(1f))
-        Text("Demo build · data is live on server", fontSize = 12.sp, color = C.Gray)
+        Text("Demo build · data stored on this phone · other users simulated", fontSize = 12.sp, color = C.Gray)
+        TextButton({ vm.resetDemo() }, Modifier.fillMaxWidth()) { Text("Reset demo data", color = C.Red) }
         OutlinedButton({ vm.logout() }, Modifier.fillMaxWidth()) { Text("Log out / switch demo user") }
     }
 }
