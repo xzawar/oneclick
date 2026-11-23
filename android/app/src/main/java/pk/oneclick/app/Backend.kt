@@ -43,7 +43,7 @@ enum class ActiveMode { CUSTOMER, PROVIDER }
 
 // ---------- views for the UI ----------
 data class Category(val slug: String, val name: String, val recommendedFare: Long)
-data class MapProvider(val id: String, val lat: Double, val lng: Double)
+data class MapProvider(val id: String, val name: String, val category: String, val rating: Double, val lat: Double, val lng: Double)
 data class OfferView(
     val id: String, val providerName: String, val amount: Long, val etaMin: Int, val distanceKm: Double,
     val rating: Double, val ratingCount: Int, val jobs: Int, val secondsLeft: Int, val isCounter: Boolean,
@@ -222,16 +222,26 @@ class Backend(
         return d
     }
 
-    private fun botMakesOffer(d: Db, b: DbBooking, t: Long): Db {
-        val p = d.providers.firstOrNull { it.userId != user() && it.isOnline && !it.isOnJob && b.category in it.categories &&
-            d.wallet(it.userId).balance >= MIN_BALANCE } ?: return d
-        val mine = b.offers.filter { it.providerId == p.userId }
-        if (mine.any { it.status == "open" } || mine.size >= 3) return d
-        val since = t - max(b.stepAt, mine.maxOfOrNull { it.createdAt } ?: 0)
-        if (since < if (mine.isEmpty()) 4_000 else 8_000) return d
-        val rec = CATEGORIES.first { it.slug == b.category }.recommendedFare
-        val amount = if (b.fare >= rec || mine.isNotEmpty()) b.fare else ((b.fare + 100) / 50) * 50
-        return d.put(b.copy(offers = b.offers + DbOffer(UUID.randomUUID().toString(), p.userId, amount, t, t + OFFER_MS)))
+    /** Every free provider in range answers, nearest first, a few seconds apart. */
+    private fun botMakesOffer(d0: Db, b0: DbBooking, t: Long): Db {
+        var d = d0
+        val rec = CATEGORIES.first { it.slug == b0.category }.recommendedFare
+        d.providers.filter { it.userId != user() && it.isOnline && !it.isOnJob && b0.category in it.categories &&
+            d.wallet(it.userId).balance >= MIN_BALANCE && km(it.lat, it.lng, b0.lat, b0.lng) <= it.radiusKm }
+            .sortedBy { km(it.lat, it.lng, b0.lat, b0.lng) }
+            .forEachIndexed { i, p ->
+                val b = d.booking(b0.id)
+                val mine = b.offers.filter { it.providerId == p.userId }
+                if (mine.any { it.status == "open" } || mine.size >= 3) return@forEachIndexed
+                val since = t - max(b.stepAt, mine.maxOfOrNull { it.createdAt } ?: 0)
+                if (since < if (mine.isEmpty()) 4_000L + 3_000L * i else 8_000L) return@forEachIndexed
+                val amount = when {
+                    i == 0 -> if (b.fare >= rec || mine.isNotEmpty()) b.fare else ((b.fare + 100) / 50) * 50
+                    else -> ((max(b.fare, rec) + 50L * i) / 50) * 50
+                }
+                d = d.put(b.copy(offers = b.offers + DbOffer(UUID.randomUUID().toString(), p.userId, amount, t, t + OFFER_MS)))
+            }
+        return d
     }
 
     private fun Db.ensureFunds(userId: String, need: Long): Db {
@@ -275,13 +285,29 @@ class Backend(
     // ---------- API used by the UI ----------
     fun accounts(): List<DbUser> = db.users
 
+    fun findByPhone(phone: String): DbUser? = normalizePhone(phone)?.let { n -> db.users.firstOrNull { it.phone == n } }
+
+    /** Sign in with a Pakistani mobile number. New numbers become customer accounts with Rs 1,000 welcome credit. */
+    suspend fun signIn(phone: String, name: String): DbUser = lock.withLock {
+        val n = normalizePhone(phone) ?: throw AppError("Enter a valid mobile number, e.g. 0300 1234567")
+        db.users.firstOrNull { it.phone == n }?.let { return@withLock it }
+        val clean = name.trim().replace(Regex("\\s+"), " ")
+        if (clean.length < 2) throw AppError("Enter your full name")
+        val u = DbUser("u-" + UUID.randomUUID().toString().take(8), clean.take(40), n, "customer")
+        db = db.copy(users = db.users + u, wallets = db.wallets + DbWallet(u.id, WELCOME_CREDIT)).let {
+            it.copy(txns = it.txns + DbTxn(UUID.randomUUID().toString(), null, null, u.id, WELCOME_CREDIT, "wallet_topup", "approved", "WELCOME-" + u.id.takeLast(4).uppercase(), now))
+        }
+        file.writeText(JSON.encodeToString(Db.serializer(), db))
+        u
+    }
+
     suspend fun me(): Me = tx { d ->
         d to Me(d.user(me), d.wallet(me), d.providers.firstOrNull { it.userId == me })
     }
 
     suspend fun mapProviders(): List<MapProvider> = tx { d ->
         d to d.providers.filter { it.userId != me && it.isOnline && !it.isOnJob && d.wallet(it.userId).balance >= MIN_BALANCE }
-            .map { MapProvider(it.userId, it.lat, it.lng) }
+            .map { MapProvider(it.userId, d.user(it.userId).name, it.categories.first(), it.rating, it.lat, it.lng) }
     }
 
     suspend fun activeJob(): JobView? = tx { d ->
@@ -457,11 +483,27 @@ class Backend(
         const val HOME_ADDRESS = "Gulberg III, Lahore"
         const val CUSTOMER_ID = "u-customer"
         const val PROVIDER_ID = "u-provider"
-        val CATEGORIES = listOf(Category("plumber", "Plumber", 800), Category("electrician", "Electrician", 700))
+        const val WELCOME_CREDIT = 1000L
+        val CATEGORIES = listOf(
+            Category("plumber", "Plumber", 800), Category("electrician", "Electrician", 700),
+            Category("mechanic", "Mechanic", 1000), Category("carpenter", "Carpenter", 900),
+            Category("painter", "Painter", 1500), Category("welder", "Welder", 1200),
+        )
         val ISSUES = mapOf(
             "electrician" to listOf("Fan not working", "UPS wiring", "Socket sparking", "DB board tripping"),
             "plumber" to listOf("Geyser leaking", "Kitchen tap broken", "Water motor not starting"),
         ).withDefault { listOf("Repair needed") }
+
+        fun normalizePhone(input: String): String? {
+            val d = input.filter(Char::isDigit)
+            val local = when {
+                d.startsWith("92") && d.length == 12 -> d.drop(2)
+                d.startsWith("03") && d.length == 11 -> d.drop(1)
+                d.startsWith("3") && d.length == 10 -> d
+                else -> return null
+            }
+            return "+92$local"
+        }
         val TXN_TITLES = mapOf(
             "wallet_topup" to "Top-up", "escrow_hold" to "Payment held", "release" to "Job earnings",
             "commission" to "Service fee", "refund" to "Refund", "withdrawal" to "Withdrawal",
@@ -475,14 +517,29 @@ class Backend(
             return 2 * 6371.0 * asin(sqrt(h))
         }
 
+        /** Other verified providers around Gulberg (they act on their own). */
+        private val BOTS = listOf(
+            Triple("u-sara", "Sara Iqbal", Triple("electrician", 4.9, 31.5178 to 74.3618)),
+            Triple("u-usman", "Usman Tariq", Triple("mechanic", 4.6, 31.5161 to 74.3531)),
+            Triple("u-kashif", "Kashif Mehmood", Triple("carpenter", 4.5, 31.5279 to 74.3566)),
+            Triple("u-imran", "Imran Butt", Triple("painter", 4.7, 31.5142 to 74.3640)),
+            Triple("u-bilal", "Bilal Hussain", Triple("welder", 4.4, 31.5257 to 74.3628)),
+        ).mapIndexed { i, (id, name, info) ->
+            val (cat, rating, pos) = info
+            DbUser(id, name, "+9230011100" + (20 + i), "provider") to DbProvider(id, listOf(cat), isOnline = true,
+                tier = if (rating >= 4.7) "gold" else "silver", rating = rating, ratingCount = 40 + 17 * i, totalJobs = 40 + 17 * i,
+                lat = pos.first, lng = pos.second, radiusKm = 8)
+        }
+
         fun seed(t: Long) = Db(
             users = listOf(
                 DbUser(CUSTOMER_ID, "Hamza Ali", "+923001110001", "customer"),
                 DbUser(PROVIDER_ID, "Ahmad Khan", "+923001110012", "provider"),
-            ),
+            ) + BOTS.map { it.first },
             providers = listOf(DbProvider(PROVIDER_ID, listOf("plumber", "electrician"), isOnline = true, tier = "silver",
-                rating = 4.8, ratingCount = 127, totalJobs = 127, lat = 31.5236, lng = 74.3562, radiusKm = 8)),
-            wallets = listOf(DbWallet(CUSTOMER_ID, 5000), DbWallet(PROVIDER_ID, 1200, earned = 21_000)),
+                rating = 4.8, ratingCount = 127, totalJobs = 127, lat = 31.5236, lng = 74.3562, radiusKm = 8)) + BOTS.map { it.second },
+            wallets = listOf(DbWallet(CUSTOMER_ID, 5000), DbWallet(PROVIDER_ID, 1200, earned = 21_000)) +
+                BOTS.map { DbWallet(it.first.id, 900, earned = 15_000) },
             txns = listOf(
                 DbTxn("seed-1", null, null, CUSTOMER_ID, 5000, "wallet_topup", "approved", "JC-58210443", t - 259_200_000),
                 DbTxn("seed-2", null, null, PROVIDER_ID, 1200, "wallet_topup", "approved", "EP-77120931", t - 172_800_000),

@@ -1,120 +1,137 @@
 package pk.oneclick.app
 
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.drawable.GradientDrawable
+import android.os.Build
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.composed
-import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.XYTileSource
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.Marker
-import org.osmdroid.views.overlay.Overlay
-import org.osmdroid.views.overlay.Polyline
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.LatLngBounds
+import com.google.android.gms.maps.model.MapStyleOptions
+import com.google.maps.android.compose.*
+import kotlin.math.cos
 
-// ---- small modifiers used across the UI ----
-fun Modifier.clickableNoIndication(onClick: () -> Unit) = composed {
-    clickable(remember { MutableInteractionSource() }, null, onClick = onClick)
+enum class PinKind { Provider, You, Me }
+data class Pin(val id: String, val lat: Double, val lng: Double, val kind: PinKind, val category: String? = null)
+
+/** JVM screenshot tests have no Google Play services; they get a drawn stand-in map. */
+val isJvmTest: Boolean = Build.FINGERPRINT == "robolectric"
+
+private val LAHORE = LatLngBounds(LatLng(31.35, 74.15), LatLng(31.65, 74.50))
+
+fun categoryIcon(slug: String?): ImageVector = when (slug) {
+    "plumber" -> Icons.Outlined.Plumbing; "electrician" -> Icons.Outlined.ElectricalServices
+    "mechanic" -> Icons.Outlined.CarRepair; "carpenter" -> Icons.Outlined.Carpenter
+    "painter" -> Icons.Outlined.FormatPaint; "welder" -> Icons.Outlined.Construction
+    else -> Icons.Outlined.HomeRepairService
 }
-fun Modifier.onFocus(block: (Boolean) -> Unit) = onFocusChanged { block(it.isFocused) }
-fun Modifier.borderDna(color: Color) = border(2.dp, color, DnaShape.xs)
 
-enum class PinKind { Provider, You, Customer }
-data class Pin(val lat: Double, val lng: Double, val kind: PinKind)
-
-private val LIGHT = XYTileSource("CartoLight", 1, 19, 256, ".png", arrayOf(
-    "https://a.basemaps.cartocdn.com/rastertiles/voyager/", "https://b.basemaps.cartocdn.com/rastertiles/voyager/"))
-private val DARK = XYTileSource("CartoDark", 1, 19, 256, ".png", arrayOf(
-    "https://a.basemaps.cartocdn.com/dark_all/", "https://b.basemaps.cartocdn.com/dark_all/"))
-
-private class RadarOverlay : Overlay() {
-    var at: GeoPoint? = null
-    var phase = 0f
-    var color = 0
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    override fun draw(c: Canvas, map: MapView, shadow: Boolean) {
-        val p = at ?: return
-        if (shadow) return
-        val pt = map.projection.toPixels(p, null)
-        val maxR = 200 * map.resources.displayMetrics.density // 400dp circle
-        for (i in 0..1) {
-            val f = (phase + i * .5f) % 1f
-            paint.color = color; paint.alpha = ((1 - f) * 45).toInt()
-            c.drawCircle(pt.x.toFloat(), pt.y.toFloat(), maxR * f, paint)
+@Composable
+private fun PinContent(p: Pin) {
+    when (p.kind) {
+        PinKind.You -> Box(Modifier.size(26.dp).clip(CircleShape).background(Color.White), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(18.dp).clip(CircleShape).background(OC.gold).border(4.dp, OC.deep, CircleShape))
+        }
+        else -> Box(Modifier.size(42.dp).clip(CircleShape).background(Color.White), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(36.dp).clip(CircleShape).background(OC.deep), contentAlignment = Alignment.Center) {
+                Icon(categoryIcon(p.category), null, Modifier.size(20.dp), tint = OC.gold)
+            }
         }
     }
 }
 
 /**
- * Full-bleed calm map. [focus] re-centres when [focusKey] changes; [offsetY] pushes the focus point up so it
- * sits in the visible area above the sheet. [radarPhase] ≥ 0 draws the pulsing search circle around [radarAt].
+ * Real Google Map of Lahore in the calm One Click style. [focusKey] changes re-centre on [focus];
+ * [bottomPadding] keeps the focus above the sheet. [radar] pulses a search circle around [radarAt].
  */
 @Composable
-fun MapCanvas(
-    pins: List<Pin>, modifier: Modifier = Modifier, focus: GeoPoint, focusKey: Any = Unit, zoom: Double = 15.5,
-    offsetY: Int = 0, route: Pair<GeoPoint, GeoPoint>? = null, radarAt: GeoPoint? = null, radarPhase: Float = -1f,
+fun LahoreMap(
+    pins: List<Pin>, modifier: Modifier = Modifier, focus: LatLng, focusKey: Any = Unit, zoom: Float = 15f,
+    bottomPadding: Dp = 0.dp, route: Pair<LatLng, LatLng>? = null, radarAt: LatLng? = null, radar: Boolean = false,
+    onPinClick: (String) -> Unit = {},
 ) {
+    val phase = if (radar) rememberInfiniteTransition(label = "radar")
+        .animateFloat(0f, 1f, infiniteRepeatable(tween(2200, easing = LinearEasing)), label = "p").value else 0f
+    if (isJvmTest) { DrawnMap(pins, modifier, focus, bottomPadding, route, if (radar) phase else -1f); return }
     val ctx = LocalContext.current
-    val c = dna
-    val density = ctx.resources.displayMetrics.density
-    val radar = remember { RadarOverlay() }
-    var lastKey by remember { mutableStateOf<Any?>(null) }
-    val map = remember {
-        Configuration.getInstance().userAgentValue = ctx.packageName
-        MapView(ctx).apply {
-            setMultiTouchControls(true)
-            zoomController.setVisibility(org.osmdroid.views.CustomZoomButtonsController.Visibility.NEVER)
-            isTilesScaledToDpi = true
-            minZoomLevel = 11.0
-            controller.setZoom(zoom)
-            controller.setCenter(focus)
+    val style = remember { MapStyleOptions.loadRawResourceStyle(ctx, R.raw.map_style) }
+    val camera = rememberCameraPositionState { position = CameraPosition.fromLatLngZoom(focus, zoom) }
+    LaunchedEffect(focusKey) { camera.animate(CameraUpdateFactory.newLatLngZoom(focus, zoom), 600) }
+    GoogleMap(
+        modifier = modifier, cameraPositionState = camera,
+        properties = MapProperties(mapStyleOptions = style, minZoomPreference = 11f, maxZoomPreference = 19f, latLngBoundsForCameraTarget = LAHORE),
+        uiSettings = MapUiSettings(zoomControlsEnabled = false, mapToolbarEnabled = false, myLocationButtonEnabled = false,
+            compassEnabled = false, tiltGesturesEnabled = false, indoorLevelPickerEnabled = false),
+        contentPadding = PaddingValues(top = 72.dp, bottom = bottomPadding),
+    ) {
+        if (radar && radarAt != null) for (i in 0..1) {
+            val f = (phase + i * .5f) % 1f
+            Circle(center = radarAt, radius = 60.0 + 600.0 * f, fillColor = OC.deep.copy(alpha = .16f * (1 - f)),
+                strokeColor = OC.deep.copy(alpha = .25f * (1 - f)), strokeWidth = 2f)
+        }
+        route?.let { (a, b) -> Polyline(points = listOf(a, b), color = OC.deep, width = 12f, jointType = 2) }
+        pins.forEach { p ->
+            key(p.id) {
+                val state = remember { MarkerState(LatLng(p.lat, p.lng)) }
+                state.position = LatLng(p.lat, p.lng)
+                MarkerComposable(p.kind, p.category ?: "", state = state, anchor = Offset(.5f, .5f), zIndex = if (p.kind == PinKind.You) 2f else 1f,
+                    onClick = { onPinClick(p.id); true }) { PinContent(p) }
+            }
         }
     }
-    DisposableEffect(Unit) { onDispose { map.onDetach() } }
-    AndroidView(factory = { map }, modifier = modifier, update = { mv ->
-        mv.setTileSource(if (c.dark) DARK else LIGHT)
-        mv.setMapCenterOffset(0, -offsetY)
-        if (lastKey != focusKey) { lastKey = focusKey; mv.controller.animateTo(focus, zoom, 350L) }
-        mv.overlays.clear()
-        radar.at = radarAt; radar.phase = radarPhase; radar.color = c.textPrimary.toArgb()
-        if (radarAt != null && radarPhase >= 0) mv.overlays.add(radar)
-        route?.let { (a, b) ->
-            mv.overlays.add(Polyline(mv).apply {
-                setPoints(listOf(a, b))
-                outlinePaint.color = c.textPrimary.toArgb(); outlinePaint.strokeWidth = 4 * density
-                outlinePaint.strokeCap = Paint.Cap.ROUND
-            })
-        }
-        pins.forEach { p ->
-            mv.overlays.add(Marker(mv).apply {
-                position = GeoPoint(p.lat, p.lng)
-                icon = pinDrawable(p.kind, density, c)
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                setOnMarkerClickListener { _, _ -> true }
-                infoWindow = null
-            })
-        }
-        mv.invalidate()
-    })
 }
 
-private fun pinDrawable(kind: PinKind, density: Float, c: DnaColors) = GradientDrawable().apply {
-    shape = GradientDrawable.OVAL
-    val size = when (kind) { PinKind.Provider -> 26; PinKind.You -> 22; PinKind.Customer -> 22 }
-    when (kind) {
-        PinKind.Provider -> { setColor(Color(0xFF181818).toArgb()); setStroke((4 * density).toInt(), android.graphics.Color.WHITE) }
-        else -> { setColor(c.brand.toArgb()); setStroke((5 * density).toInt(), Color(0xFF181818).toArgb()) }
+/** Stand-in for tests: a quiet street grid with pins placed by a simple local projection (zoom ~15). */
+@Composable
+private fun DrawnMap(pins: List<Pin>, modifier: Modifier, focus: LatLng, bottomPadding: Dp, route: Pair<LatLng, LatLng>?, radar: Float) {
+    BoxWithConstraints(modifier.background(Color(0xFFF3F5F3))) {
+        val cx = maxWidth / 2; val cy = (maxHeight - bottomPadding + 72.dp) / 2
+        fun pos(lat: Double, lng: Double): Pair<Dp, Dp> {
+            val mPerDp = 2.4 // ≈ zoom 15 at Lahore
+            val dx = (lng - focus.longitude) * 111_320 * cos(Math.toRadians(focus.latitude)) / mPerDp
+            val dy = (focus.latitude - lat) * 110_540 / mPerDp
+            return (cx + dx.dp) to (cy + dy.dp)
+        }
+        Canvas(Modifier.fillMaxSize()) {
+            for (i in 0..12) {
+                drawLine(Color.White, Offset(0f, i * size.height / 12), Offset(size.width, i * size.height / 12 + 40), strokeWidth = if (i % 4 == 0) 22f else 10f)
+                drawLine(Color.White, Offset(i * size.width / 6, 0f), Offset(i * size.width / 6 - 60, size.height), strokeWidth = if (i % 3 == 0) 22f else 10f)
+            }
+            drawCircle(Color(0xFFDCEBE2), radius = size.width * .18f, center = Offset(size.width * .82f, size.height * .2f))
+            if (radar >= 0) {
+                val (x, y) = pos(focus.latitude, focus.longitude)
+                for (i in 0..1) { val f = (radar + i * .5f) % 1f
+                    drawCircle(OC.deep.copy(alpha = .16f * (1 - f)), radius = (30 + 240 * f).dp.toPx(), center = Offset(x.toPx(), y.toPx())) }
+            }
+            route?.let { (a, b) ->
+                val (ax, ay) = pos(a.latitude, a.longitude); val (bx, by) = pos(b.latitude, b.longitude)
+                drawLine(OC.deep, Offset(ax.toPx(), ay.toPx()), Offset(bx.toPx(), by.toPx()), strokeWidth = 5.dp.toPx())
+            }
+        }
+        pins.sortedBy { it.kind == PinKind.You }.forEach { p ->
+            val (x, y) = pos(p.lat, p.lng)
+            Box(Modifier.offset(x - 21.dp, y - 21.dp).size(42.dp), contentAlignment = Alignment.Center) { PinContent(p) }
+        }
     }
-    setSize((size * density).toInt(), (size * density).toInt())
 }

@@ -6,8 +6,11 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -20,208 +23,246 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import org.osmdroid.util.GeoPoint
+import androidx.compose.ui.unit.sp
+import com.google.android.gms.maps.model.LatLng
 import java.io.File
+import java.util.Calendar
 
-private val HOME = GeoPoint(Backend.HOME_LAT, Backend.HOME_LNG)
-private val ON_JOB = listOf("accepted", "en_route", "arrived", "in_progress", "disputed")
+val HOME = LatLng(Backend.HOME_LAT, Backend.HOME_LNG)
+val ON_JOB = listOf("accepted", "en_route", "arrived", "in_progress", "disputed")
+val TAB_BAR = 65.dp
 
+/** Map-first page: full-bleed Lahore map, floating chips on top, one sheet above the tab bar. */
 @Composable
-fun radarPhase(active: Boolean): Float {
-    if (!active) return -1f
-    val t = rememberInfiniteTransition(label = "radar")
-    return t.animateFloat(0f, 1f, infiniteRepeatable(tween(2400, easing = LinearEasing)), label = "phase").value
+fun MapPage(
+    pins: List<Pin>, focus: LatLng, focusKey: Any, route: Pair<LatLng, LatLng>?, radar: Boolean, zoom: Float = 15f,
+    topLeft: @Composable () -> Unit, overSheet: @Composable ColumnScope.() -> Unit = {}, sheet: @Composable ColumnScope.() -> Unit,
+) {
+    var sheetPx by remember { mutableIntStateOf(0) }
+    var recenter by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
+    val sheetDp = with(density) { sheetPx.toDp() }
+    Box(Modifier.fillMaxSize()) {
+        LahoreMap(pins, Modifier.fillMaxSize(), focus, "$focusKey-$recenter", zoom, bottomPadding = sheetDp + TAB_BAR, route = route, radarAt = focus, radar = radar)
+        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(Space.lg), verticalAlignment = Alignment.CenterVertically) {
+            topLeft()
+            Spacer(Modifier.weight(1f))
+            Surface(onClick = { recenter++ }, shape = CircleShape, color = OC.bg, shadowElevation = 4.dp, modifier = Modifier.size(48.dp)) {
+                Box(contentAlignment = Alignment.Center) { Icon(Icons.Outlined.MyLocation, "My location", Modifier.size(22.dp), tint = OC.ink) }
+            }
+        }
+        Column(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = TAB_BAR).onSizeChanged { sheetPx = it.height }) {
+            overSheet()
+            Column(Modifier.fillMaxWidth().heightIn(max = 560.dp).clip(Radius.sheet).background(OC.bg)
+                .verticalScroll(rememberScrollState()).padding(horizontal = Space.lg).padding(bottom = Space.lg)
+                .animateContentSize(tween(250, easing = Motion.emphasized)), verticalArrangement = Arrangement.spacedBy(Space.lg)) {
+                Box(Modifier.fillMaxWidth().padding(top = Space.md), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(36.dp, 4.dp).clip(CircleShape).background(OC.cardStrong))
+                }
+                sheet()
+            }
+        }
+    }
 }
 
 @Composable
-fun CustomerHome(s: UiState, vm: AppViewModel, openMenu: () -> Unit) {
+fun LocationChip(text: String) {
+    Surface(shape = CircleShape, color = OC.bg, shadowElevation = 4.dp) {
+        Row(Modifier.height(48.dp).padding(horizontal = Space.lg), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(10.dp).clip(CircleShape).background(OC.gold))
+            Spacer(Modifier.width(Space.sm))
+            Text(text, style = T.label)
+        }
+    }
+}
+
+fun greeting(): String = when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) { in 5..11 -> "Good morning"; in 12..16 -> "Good afternoon"; else -> "Good evening" }
+
+@Composable
+fun CustomerHome(s: UiState, vm: AppViewModel) {
     val job = s.job
     val searching = job?.status == "pending"
     val onJob = job != null && job.status in ON_JOB
-    var sheetPx by remember { mutableIntStateOf(0) }
-    var recenter by remember { mutableIntStateOf(0) }
-    var category by rememberSaveable { mutableStateOf("plumber") }
+    var category by rememberSaveable { mutableStateOf<String?>(null) }
     var description by rememberSaveable { mutableStateOf("") }
-    val rec = Backend.CATEGORIES.first { it.slug == category }.recommendedFare
-    var fare by rememberSaveable(category) { mutableLongStateOf(rec) }
+    var fare by rememberSaveable(category) { mutableLongStateOf(Backend.CATEGORIES.firstOrNull { it.slug == category }?.recommendedFare ?: 800) }
     var fareSheet by remember { mutableStateOf(false) }
 
     val pins = buildList {
-        add(Pin(Backend.HOME_LAT, Backend.HOME_LNG, PinKind.You))
-        if (onJob) add(Pin(job!!.providerLat, job.providerLng, PinKind.Provider))
-        else s.mapProviders.forEach { add(Pin(it.lat, it.lng, PinKind.Provider)) }
+        add(Pin("you", HOME.latitude, HOME.longitude, PinKind.You))
+        if (onJob) add(Pin("p", job!!.providerLat, job.providerLng, PinKind.Provider, job.category))
+        else s.mapProviders.filter { category == null || it.category == category }.forEach { add(Pin(it.id, it.lat, it.lng, PinKind.Provider, it.category)) }
     }
-    val route = if (job != null && job.status in listOf("accepted", "en_route"))
-        GeoPoint(job.providerLat, job.providerLng) to HOME else null
+    val route = if (job != null && job.status in listOf("accepted", "en_route")) LatLng(job.providerLat, job.providerLng) to HOME else null
 
     Box(Modifier.fillMaxSize()) {
-        MapCanvas(pins, Modifier.fillMaxSize(), focus = HOME, focusKey = "${job?.status}-$recenter",
-            offsetY = sheetPx / 2, route = route, radarAt = HOME, radarPhase = radarPhase(searching))
-        RoundButton(Icons.Outlined.Menu, "Menu", openMenu, Modifier.statusBarsPadding().padding(8.dp))
-        Text("© OpenStreetMap © CARTO", style = DnaType.caption, color = dna.textSecondary,
-            modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(12.dp))
-
-        Column(Modifier.align(Alignment.BottomCenter).onSizeChanged { sheetPx = it.height }) {
-            if (searching) job!!.offers.forEach { o ->
-                key(o.id) {
-                    var shown by remember { mutableStateOf(false) }
-                    LaunchedEffect(Unit) { shown = true }
-                    AnimatedVisibility(shown, enter = slideInVertically(tween(DnaMotion.popup, easing = DnaMotion.standard)) { it / 2 } + fadeIn(tween(DnaMotion.fade))) {
-                        OfferCard(o, { vm.acceptOffer(o.id) }, { vm.declineOffer(o.id) }, s.busy)
+        MapPage(pins, HOME, job?.status ?: "idle", route, searching, topLeft = { LocationChip(Backend.HOME_ADDRESS) },
+            overSheet = {
+                if (searching) job!!.offers.forEach { o ->
+                    key(o.id) {
+                        var shown by remember { mutableStateOf(false) }
+                        LaunchedEffect(Unit) { shown = true }
+                        AnimatedVisibility(shown, enter = slideInVertically(tween(300, easing = Motion.emphasized)) { it / 2 } + fadeIn(tween(200))) {
+                            OfferCard(o, s.busy, { vm.acceptOffer(o.id) }) { vm.declineOffer(o.id) }
+                        }
                     }
                 }
-            }
-            Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.End) {
-                RoundButton(Icons.Outlined.MyLocation, "My location", { recenter++ })
-            }
-            Sheet {
-                AnimatedContent(when { searching -> "search"; onJob -> "job"; else -> "form" }, label = "sheet",
-                    transitionSpec = { fadeIn(tween(DnaMotion.fade)) togetherWith fadeOut(tween(DnaMotion.fade)) }) { mode ->
-                    Column {
-                        when (mode) {
-                            "search" -> s.job?.takeIf { it.status == "pending" }?.let { SearchingSheet(it, s, vm) }
-                            "job" -> s.job?.takeIf { it.status in ON_JOB }?.let { CustomerJobSheet(it, s, vm) }
-                            else -> OrderForm(s, vm, category, { category = it }, description, { description = it.take(200) }, fare) { fareSheet = true }
-                        }
+            }) {
+            AnimatedContent(when { searching -> "search"; onJob -> "job"; else -> "form" }, label = "sheet",
+                transitionSpec = { fadeIn(tween(220, easing = Motion.emphasized)) togetherWith fadeOut(tween(120)) }) { mode ->
+                Column(verticalArrangement = Arrangement.spacedBy(Space.lg)) {
+                    when (mode) {
+                        "search" -> s.job?.takeIf { it.status == "pending" }?.let { Searching(it, vm) }
+                        "job" -> s.job?.takeIf { it.status in ON_JOB }?.let { CustomerJob(it, s, vm) }
+                        else -> OrderForm(s, vm, category, { category = it }, description, { description = it.take(200) }, fare) { fareSheet = true }
                     }
                 }
             }
         }
-        if (fareSheet) FareSheet(fare, rec, { fare = it }) { fareSheet = false }
+        if (fareSheet) category?.let { c -> FareSheet(fare, Backend.CATEGORIES.first { it.slug == c }.recommendedFare, { fare = it }) { fareSheet = false } }
         if (job != null && job.needsRating) RatingSheet(job, vm)
     }
 }
 
 @Composable
-private fun OrderForm(
-    s: UiState, vm: AppViewModel, category: String, onCategory: (String) -> Unit, description: String,
-    onDescription: (String) -> Unit, fare: Long, openFare: () -> Unit,
-) {
-    val c = dna
-    val cancelled = s.job?.takeIf { it.status == "cancelled" }
-    if (cancelled != null) {
-        InlineAlert(when (cancelled.cancelReason) {
-            "no_offers" -> "No offers yet. Try a higher fare"
-            "customer_cancelled" -> "Request cancelled"
-            else -> "Booking cancelled. Payment refunded"
-        }, AlertKind.Warning)
-        Spacer(Modifier.height(12.dp))
+private fun OrderForm(s: UiState, vm: AppViewModel, category: String?, onCategory: (String?) -> Unit, description: String,
+                      onDescription: (String) -> Unit, fare: Long, openFare: () -> Unit) {
+    s.job?.takeIf { it.status == "cancelled" }?.let {
+        Note(when (it.cancelReason) { "no_offers" -> "No offers yet. Try a higher fare"; "customer_cancelled" -> "Request cancelled"; else -> "Booking cancelled. Payment refunded" }, gold = true)
     }
-    SectionTitle("Book a pro nearby")
-    Spacer(Modifier.height(12.dp))
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Backend.CATEGORIES.forEach { cat ->
-            ChoiceChip(cat.name, cat.slug == category, { onCategory(cat.slug) }, categoryIcon(cat.slug))
+    Column {
+        Text("${greeting()}, ${firstName(s.me?.user?.name ?: "")}", style = T.small)
+        Text(if (category == null) "What needs fixing?" else "Book a ${categoryName(category).lowercase()}", style = T.h1.copy(fontSize = 28.sp, lineHeight = 32.sp))
+    }
+    val cats = Backend.CATEGORIES
+    Column(verticalArrangement = Arrangement.spacedBy(Space.sm)) {
+        cats.chunked(3).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                row.forEach { c ->
+                    val on = c.slug == category
+                    Surface(onClick = { onCategory(if (on) null else c.slug) }, shape = Radius.lg, color = if (on) OC.deep else OC.card, modifier = Modifier.weight(1f)) {
+                        Column(Modifier.padding(Space.md), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Box(Modifier.size(36.dp).clip(CircleShape).background(if (on) OC.gold else OC.bg), contentAlignment = Alignment.Center) {
+                                Icon(categoryIcon(c.slug), null, Modifier.size(20.dp), tint = OC.deep)
+                            }
+                            Text(c.name, style = T.label.copy(color = if (on) Color.White else OC.ink), maxLines = 1)
+                            Text("from ${rs(c.recommendedFare)}", style = T.tiny.copy(color = if (on) Color.White.copy(alpha = .7f) else OC.muted), maxLines = 1)
+                        }
+                    }
+                }
+            }
         }
     }
-    Spacer(Modifier.height(8.dp))
-    Cell(Backend.HOME_ADDRESS, subtitle = "Your location", lead = {
-        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-            Box(Modifier.size(12.dp).clip(CircleShape).background(c.brand))
+    AnimatedVisibility(category != null, enter = expandVertically(tween(250, easing = Motion.emphasized)) + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+        Column(verticalArrangement = Arrangement.spacedBy(Space.lg)) {
+            Field(description, onDescription, "Describe the problem (optional)")
+            Surface(onClick = openFare, shape = Radius.lg, color = OC.card) {
+                Row(Modifier.padding(Space.lg), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Your fare", style = T.tiny)
+                        Text(rs(fare), style = T.number)
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("Wallet", style = T.tiny)
+                        Text(rs(s.me?.wallet?.balance ?: 0), style = T.label)
+                    }
+                    Icon(Icons.Outlined.ChevronRight, null, Modifier.padding(start = Space.sm), tint = OC.muted)
+                }
+            }
+            PillButton("Find a ${categoryName(category ?: "").lowercase()}", { category?.let { vm.createRequest(it, description, fare) } },
+                Modifier.fillMaxWidth(), loading = s.busy)
         }
-    })
-    DnaField(description, onDescription, "What needs fixing?")
-    Spacer(Modifier.height(4.dp))
-    Cell(rs(fare), subtitle = "Your fare · Wallet ${rs(s.me?.wallet?.balance ?: 0)}", icon = Icons.Outlined.Payments,
-        titleStyle = DnaType.heading4, onClick = openFare,
-        end = { Icon(Icons.Outlined.ChevronRight, null, tint = c.textSecondary) })
-    Spacer(Modifier.height(12.dp))
-    DnaButton("Find providers", { vm.createRequest(category, description, fare) }, Modifier.fillMaxWidth(), loading = s.busy)
+    }
 }
 
 @Composable
 private fun FareSheet(fare: Long, rec: Long, onFare: (Long) -> Unit, onDone: () -> Unit) {
-    val c = dna
-    val step = 50L
     OverlaySheet(onDone) {
-        SectionTitle("Offer your fare")
-        Helper("Recommended: ${rs(rec)}")
-        Spacer(Modifier.height(24.dp))
+        Text("Offer your fare", style = T.title)
+        Text("Recommended for this job: ${rs(rec)}", style = T.small)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            RoundButton(Icons.Outlined.Remove, "Decrease fare", { onFare((fare - step).coerceAtLeast(Backend.MIN_FARE)) }, size = 48.dp, floating = false)
+            RoundSoft(Icons.Outlined.Remove, "Decrease fare") { onFare((fare - 50).coerceAtLeast(Backend.MIN_FARE)) }
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Rs", style = DnaType.heading4, color = c.textSecondary)
-                AnimatedContent(fare, label = "fare", transitionSpec = { fadeIn(tween(DnaMotion.follow)) togetherWith fadeOut(tween(DnaMotion.follow)) }) {
-                    Text("%,d".format(it), style = DnaType.largeNumbers, color = c.textPrimary, maxLines = 1)
-                }
+                Text("Rs", style = T.label.copy(color = OC.muted))
+                AnimatedContent(fare, label = "fare", transitionSpec = {
+                    (slideInVertically(tween(180)) { if (targetState > initialState) it / 3 else -it / 3 } + fadeIn(tween(180))) togetherWith fadeOut(tween(120))
+                }) { Text("%,d".format(it), style = T.display.copy(fontSize = 56.sp, lineHeight = 60.sp), maxLines = 1) }
             }
-            RoundButton(Icons.Outlined.Add, "Increase fare", { onFare((fare + step).coerceAtMost(Backend.MAX_FARE)) }, size = 48.dp, floating = false)
+            RoundSoft(Icons.Outlined.Add, "Increase fare") { onFare((fare + 50).coerceAtMost(Backend.MAX_FARE)) }
         }
-        Spacer(Modifier.height(16.dp))
-        // The UI coaches instead of blocking.
         when {
-            fare <= Backend.MIN_FARE -> InlineAlert("Minimum fare reached", AlertKind.Warning)
-            fare < rec -> InlineAlert("Fewer offers & longer wait", AlertKind.Warning)
-            fare == rec -> InlineAlert("Recommended fare", AlertKind.Brand)
-            else -> InlineAlert("More offers · faster response", AlertKind.Success)
+            fare <= Backend.MIN_FARE -> Note("Minimum fare reached")
+            fare < rec -> Note("Fewer offers and a longer wait", gold = true)
+            fare == rec -> Note("Recommended fare")
+            else -> Note("More offers, faster response")
         }
-        Spacer(Modifier.height(16.dp))
-        DnaButton("Done", onDone, Modifier.fillMaxWidth())
+        PillButton("Done", onDone, Modifier.fillMaxWidth())
     }
 }
 
-private val SEARCH_LINES = listOf("Providers see your request", "Reaching more providers", "All providers are verified", "You choose your provider")
+@Composable
+fun RoundSoft(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, size: Dp = 52.dp, onCard: Boolean = false, onClick: () -> Unit) {
+    Surface(onClick = onClick, shape = CircleShape, color = if (onCard) OC.bg else OC.card, modifier = Modifier.size(size)) {
+        Box(contentAlignment = Alignment.Center) { Icon(icon, label, Modifier.size(22.dp), tint = OC.ink) }
+    }
+}
+
+private val SEARCH_LINES = listOf("Pros nearby see your request", "Reaching more pros", "Every pro is verified", "You choose who comes")
 
 @Composable
-private fun SearchingSheet(job: JobView, s: UiState, vm: AppViewModel) {
-    val c = dna
+private fun Searching(job: JobView, vm: AppViewModel) {
     var confirmCancel by remember { mutableStateOf(false) }
-    val line = SEARCH_LINES[(job.searchSeconds / 4) % SEARCH_LINES.size]
-    AnimatedContent(line, label = "line", transitionSpec = { fadeIn(tween(DnaMotion.fade)) togetherWith fadeOut(tween(DnaMotion.fade)) }) {
-        SectionTitle(it)
+    Column(verticalArrangement = Arrangement.spacedBy(Space.sm)) {
+        AnimatedContent(SEARCH_LINES[(job.searchSeconds / 4) % SEARCH_LINES.size], label = "line",
+            transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(120)) }) { Text(it, style = T.title) }
+        Text("${categoryName(job.category)} · ${rs(job.fare)} · ${Backend.HOME_ADDRESS.substringBefore(",")}", style = T.small)
     }
-    Helper("${categoryName(job.category)} · ${job.description.ifBlank { "No details" }}")
-    Spacer(Modifier.height(12.dp))
-    LinearProgressIndicator(Modifier.fillMaxWidth().height(3.dp).clip(CircleShape), color = c.textPrimary, trackColor = c.bgSecondary)
-    Spacer(Modifier.height(16.dp))
-    Text("Your fare", style = DnaType.compactBody, color = c.textSecondary)
-    Text(rs(job.fare), style = DnaType.heading2, color = c.textPrimary)
-    if (job.offers.isEmpty() && job.searchSeconds > 20) {
-        Spacer(Modifier.height(12.dp))
-        InlineAlert("Try raising the fare", AlertKind.Warning)
+    LinearProgressIndicator(Modifier.fillMaxWidth().height(4.dp).clip(CircleShape), color = OC.deep, trackColor = OC.card)
+    if (job.offers.isEmpty() && job.searchSeconds > 20) Note("Try raising the fare", gold = true)
+    if (job.offers.isNotEmpty()) Text("${job.offers.size} offer${if (job.offers.size > 1) "s" else ""} above — pick one", style = T.small.copy(color = OC.deep))
+    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+        PillButton("Raise to ${rs(job.fare + 50)}", { vm.raiseFare(job.fare + 50) }, Modifier.weight(1f), Btn.Soft, height = 48.dp)
+        PillButton("Cancel", { confirmCancel = true }, Modifier.weight(1f), Btn.Danger, height = 48.dp)
     }
-    Spacer(Modifier.height(16.dp))
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        DnaButton("Raise to ${rs(job.fare + 50)}", { vm.raiseFare(job.fare + 50) }, Modifier.weight(1f), BtnKind.Secondary, BtnSize.M)
-        DnaButton("Cancel request", { confirmCancel = true }, Modifier.weight(1f), BtnKind.ErrorLow, BtnSize.M)
-    }
-    if (confirmCancel) ConfirmDialog("Cancel request?", "Providers are looking at your request right now.",
-        "Keep searching", "Cancel request", { confirmCancel = false }) { confirmCancel = false; vm.cancel() }
+    if (confirmCancel) ConfirmDialog("Cancel request?", "Pros nearby are looking at it right now.", "Keep searching", "Cancel request",
+        { confirmCancel = false }) { confirmCancel = false; vm.cancel() }
 }
 
-/** Offer card: countdown bar, avatar, price as hero, ETA + distance, rating, Decline · Accept (equal widths). */
+/** Offer card floating over the map: countdown, pro, rating, ETA, price as the hero, Decline · Accept. */
 @Composable
-private fun OfferCard(o: OfferView, onAccept: () -> Unit, onDecline: () -> Unit, busy: Boolean) {
-    val c = dna
-    Surface(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), shape = DnaShape.s, color = c.surface, shadowElevation = 6.dp) {
-        Column {
-            if (!o.isCounter) Text("Accepts your fare", style = DnaType.compactBody, color = Color.White,
-                modifier = Modifier.fillMaxWidth().background(c.accent).padding(horizontal = 12.dp, vertical = 4.dp))
+private fun OfferCard(o: OfferView, busy: Boolean, onAccept: () -> Unit, onDecline: () -> Unit) {
+    Surface(Modifier.fillMaxWidth().padding(horizontal = Space.md, vertical = 4.dp), shape = Radius.xl, color = OC.bg, shadowElevation = 6.dp) {
+        Column(Modifier.padding(Space.lg), verticalArrangement = Arrangement.spacedBy(Space.md)) {
             CountdownBar(o.secondsLeft / 30f)
-            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Avatar(o.providerName, 42.dp)
-                Spacer(Modifier.width(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Avatar(o.providerName, 48.dp, ring = true)
+                Spacer(Modifier.width(Space.md))
                 Column(Modifier.weight(1f)) {
-                    Text(o.providerName, style = DnaType.mainBody, color = c.textPrimary)
-                    RatingLine(o.rating, o.ratingCount, "${o.jobs} jobs")
-                    Text("${o.etaMin} min · ${o.distanceKm} km", style = DnaType.compactBody, color = c.textSecondary, modifier = Modifier.padding(top = 2.dp))
+                    Text(o.providerName, style = T.bodyStrong)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Star, null, Modifier.size(14.dp), tint = OC.gold)
+                        Text(" ${o.rating} (${o.ratingCount}) · ${o.etaMin} min · ${o.distanceKm} km", style = T.small)
+                    }
                 }
-                Text(rs(o.amount), style = DnaType.heading3, color = c.textPrimary)
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(rs(o.amount), style = T.number)
+                    if (!o.isCounter) Badge("Your fare", Tone.Gold) else Badge("Counter-offer")
+                }
             }
-            Row(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                DnaButton("Decline", onDecline, Modifier.weight(1f), BtnKind.ErrorLow, BtnSize.S, enabled = !busy)
-                DnaButton("Accept", onAccept, Modifier.weight(1f), BtnKind.Primary, BtnSize.S, loading = busy)
+            Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                PillButton("Decline", onDecline, Modifier.weight(1f), Btn.Danger, height = 44.dp, enabled = !busy)
+                PillButton("Accept", onAccept, Modifier.weight(1f), height = 44.dp, loading = busy)
             }
         }
     }
 }
 
 @Composable
-private fun CustomerJobSheet(job: JobView, s: UiState, vm: AppViewModel) {
-    val c = dna
+private fun CustomerJob(job: JobView, s: UiState, vm: AppViewModel) {
     val name = firstName(job.otherName)
     var confirmCancel by remember { mutableStateOf(false) }
     var report by remember { mutableStateOf(false) }
@@ -229,114 +270,105 @@ private fun CustomerJobSheet(job: JobView, s: UiState, vm: AppViewModel) {
         job.status == "accepted" -> "$name is getting ready"
         job.status == "en_route" -> "$name is on the way"
         job.status == "arrived" -> "$name has arrived"
-        job.awaitingConfirmation -> "Check the work and confirm"
+        job.awaitingConfirmation -> "Check the work"
         job.status == "in_progress" -> "Job in progress"
         else -> "We’re reviewing your report"
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            SectionTitle(title)
-            Helper(if (job.status == "disputed") "Payment stays on hold" else "${rs(job.fare)} held safely until you confirm")
+            StatusPill(job.status)
+            Spacer(Modifier.height(Space.sm))
+            Text(title, style = T.title)
         }
         if (job.etaMin != null) Column(horizontalAlignment = Alignment.End) {
-            Text("${job.etaMin}", style = DnaType.heading1, color = c.textPrimary)
-            Text("min", style = DnaType.caption, color = c.textSecondary)
+            Text("${job.etaMin}", style = T.display.copy(fontSize = 44.sp))
+            Text("min away", style = T.tiny)
         }
     }
-    Spacer(Modifier.height(8.dp))
-    Cell(job.otherName, lead = { Avatar(job.otherName, 48.dp) }, titleStyle = DnaType.heading4,
-        subtitle = "★ ${job.otherRating} (${job.otherRatingCount}) · Verified",
-        end = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                RoundButton(Icons.Outlined.Call, "Call", { vm.toast("In-app calls need an Agora App ID") }, size = 48.dp, floating = false)
-                RoundButton(Icons.Outlined.Shield, "Safety", { vm.open(Page.Safety) }, size = 48.dp, floating = false)
-            }
-        })
-    Cell("${categoryName(job.category)} · ${job.description.ifBlank { "No details" }}", icon = categoryIcon(job.category))
+    Card {
+        ListRow(job.otherName, subtitle = "★ ${job.otherRating} (${job.otherRatingCount}) · Verified", left = { Avatar(job.otherName, 48.dp, ring = true) },
+            right = {
+                Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                    RoundSoft(Icons.Outlined.Call, "Call", 44.dp, onCard = true) { vm.toast("In-app calls arrive with the Agora setup") }
+                    RoundSoft(Icons.Outlined.Shield, "Safety", 44.dp, onCard = true) { vm.open(Page.Safety) }
+                }
+            })
+        Hr()
+        ListRow("${categoryName(job.category)} · ${rs(job.fare)}", subtitle = job.description.ifBlank { "No details" }, icon = categoryIcon(job.category))
+    }
     if (job.awaitingConfirmation) {
         ProofPhoto(job.photo)
-        Spacer(Modifier.height(12.dp))
-        DnaButton("Confirm and pay ${rs(job.fare)}", { vm.confirm() }, Modifier.fillMaxWidth(), loading = s.busy)
-        Spacer(Modifier.height(8.dp))
-        DnaButton("Report a problem", { report = true }, Modifier.fillMaxWidth(), BtnKind.ErrorLow, BtnSize.M)
+        PillButton("Confirm and pay ${rs(job.fare)}", { vm.confirm() }, Modifier.fillMaxWidth(), loading = s.busy)
+        PillButton("Report a problem", { report = true }, Modifier.fillMaxWidth(), Btn.Danger, height = 48.dp)
     } else when (job.status) {
-        "accepted", "en_route" -> DnaButton("Cancel booking", { confirmCancel = true }, Modifier.fillMaxWidth(), BtnKind.ErrorLow, BtnSize.M)
-        "arrived", "in_progress" -> DnaButton("Report a problem", { report = true }, Modifier.fillMaxWidth(), BtnKind.ErrorLow, BtnSize.M)
-        "disputed" -> InlineAlert("Our team will contact you within 24 hours", AlertKind.Warning)
+        "accepted", "en_route" -> PillButton("Cancel booking", { confirmCancel = true }, Modifier.fillMaxWidth(), Btn.Danger, height = 48.dp)
+        "arrived", "in_progress" -> PillButton("Report a problem", { report = true }, Modifier.fillMaxWidth(), Btn.Danger, height = 48.dp)
+        "disputed" -> Note("Payment is on hold. Our team will call you within 24 hours.", gold = true)
     }
-    Spacer(Modifier.height(12.dp))
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.Outlined.VerifiedUser, null, Modifier.size(16.dp), tint = c.success)
+        Icon(Icons.Outlined.Lock, null, Modifier.size(16.dp), tint = OC.green)
         Spacer(Modifier.width(6.dp))
-        Helper("$name passed CNIC and selfie checks")
+        Text("${rs(job.fare)} is held safely until you confirm", style = T.tiny)
     }
-    if (confirmCancel) ConfirmDialog("Cancel booking?", "$name is already preparing. Your ${rs(job.fare)} will be refunded.",
-        "Keep booking", "Cancel booking", { confirmCancel = false }) { confirmCancel = false; vm.cancel() }
+    if (confirmCancel) ConfirmDialog("Cancel booking?", "$name is already preparing. Your ${rs(job.fare)} will be refunded.", "Keep booking", "Cancel booking",
+        { confirmCancel = false }) { confirmCancel = false; vm.cancel() }
     if (report) ReportSheet(vm) { report = false }
 }
 
 @Composable
 fun ProofPhoto(path: String?) {
     val bmp = remember(path) { path?.takeIf { File(it).exists() }?.let { BitmapFactory.decodeFile(it) } }
-    if (bmp != null) Image(bmp.asImageBitmap(), "Photo proof", Modifier.fillMaxWidth().height(160.dp).clip(DnaShape.s), contentScale = ContentScale.Crop)
-    else Cell("Photo proof attached", subtitle = "Taken by the provider when the job was finished", icon = Icons.Outlined.PhotoCamera)
+    if (bmp != null) Image(bmp.asImageBitmap(), "Photo proof", Modifier.fillMaxWidth().height(170.dp).clip(Radius.lg), contentScale = ContentScale.Crop)
+    else Card { ListRow("Photo proof attached", subtitle = "Taken when the job was finished", icon = Icons.Outlined.PhotoCamera) }
 }
 
 @Composable
 private fun ReportSheet(vm: AppViewModel, onDismiss: () -> Unit) {
     var reason by remember { mutableStateOf("Overcharged") }
     OverlaySheet(onDismiss) {
-        SectionTitle("Report a problem")
-        Helper("Payment stays on hold until our team reviews")
-        Spacer(Modifier.height(8.dp))
-        listOf("Overcharged", "Poor workmanship", "Provider didn’t show up").forEach { r ->
-            Cell(r, onClick = { reason = r }, end = { RadioButton(reason == r, { reason = r }, colors = RadioButtonDefaults.colors(selectedColor = dna.textPrimary)) })
+        Text("Report a problem", style = T.title)
+        Text("The payment stays on hold until our team reviews it.", style = T.small)
+        Card {
+            listOf("Overcharged", "Poor workmanship", "Pro didn’t show up").forEachIndexed { i, r ->
+                if (i > 0) Hr()
+                ListRow(r, onClick = { reason = r }, right = { RadioButton(reason == r, { reason = r }, colors = RadioButtonDefaults.colors(selectedColor = OC.deep)) })
+            }
         }
-        Spacer(Modifier.height(12.dp))
-        DnaButton("Send report", { vm.dispute(reason); onDismiss() }, Modifier.fillMaxWidth(), BtnKind.ErrorHigh)
+        PillButton("Send report", { vm.dispute(reason); onDismiss() }, Modifier.fillMaxWidth(), Btn.Deep)
     }
 }
 
-/** Review: big check, star pop (200ms in + bounce), mood chips, one primary. */
+/** Review: gold check, star pop, mood chips, one primary. Used by both sides. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun RatingSheet(job: JobView, vm: AppViewModel) {
-    val c = dna
     var stars by remember { mutableIntStateOf(0) }
     val tags = remember { mutableStateListOf<String>() }
     val options = if (job.isCustomer) listOf("On time", "Polite", "Good quality", "Fair price") else listOf("Friendly", "Clear request", "Easy to find")
     OverlaySheet({ vm.skipRating() }) {
-        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            Box(Modifier.size(64.dp).clip(CircleShape).background(c.brand), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.Check, null, Modifier.size(32.dp), tint = c.onBrand)
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Space.sm)) {
+            Box(Modifier.size(72.dp).clip(CircleShape).background(OC.gold), contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.Check, null, Modifier.size(36.dp), tint = OC.deep)
+            }
+            Text(if (job.isCustomer) "Job done" else "${rs(job.net)} earned", style = T.h1, textAlign = TextAlign.Center)
+            Text(if (job.isCustomer) "${rs(job.fare)} paid to ${job.otherName}" else "${rs(job.fare)} minus 15% service fee", style = T.small)
+            Spacer(Modifier.height(Space.sm))
+            Text("How was ${firstName(job.otherName)}?", style = T.h2)
+            Row {
+                (1..5).forEach { n ->
+                    val on = n <= stars
+                    val scale by animateFloatAsState(if (on) 1f else .82f, spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium), label = "star")
+                    Icon(if (on) Icons.Filled.Star else Icons.Outlined.StarOutline, "$n stars",
+                        Modifier.size(46.dp).scale(scale).tap { stars = n }.padding(3.dp), tint = if (on) OC.gold else OC.cardStrong)
+                }
+            }
+            AnimatedVisibility(stars > 0) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.sm, Alignment.CenterHorizontally), verticalArrangement = Arrangement.spacedBy(Space.sm)) {
+                    options.forEach { t -> Chip(t, t in tags) { if (t in tags) tags.remove(t) else tags.add(t) } }
+                }
             }
         }
-        Spacer(Modifier.height(16.dp))
-        Text(if (job.isCustomer) "Job done" else "${rs(job.net)} added to your wallet", style = DnaType.heading2,
-            color = c.textPrimary, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
-        Helper(if (job.isCustomer) "${rs(job.fare)} paid to ${job.otherName}" else "${rs(job.fare)} minus 15% service fee",
-            Modifier.fillMaxWidth().padding(top = 4.dp).wrapContentWidth())
-        Spacer(Modifier.height(24.dp))
-        Text("How was ${firstName(job.otherName)}?", style = DnaType.heading4, color = c.textPrimary, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
-        Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-            (1..5).forEach { n ->
-                val on = n <= stars
-                val scale by animateFloatAsState(if (on) 1f else .85f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium), label = "star")
-                Icon(if (on) Icons.Outlined.Star else Icons.Outlined.StarOutline, "$n stars",
-                    Modifier.size(44.dp).scale(scale).clickableNoIndication { stars = n }.padding(2.dp),
-                    tint = if (on) c.textPrimary else c.bgTertiary)
-            }
-        }
-        if (stars > 0) {
-            Spacer(Modifier.height(16.dp))
-            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                options.forEach { t -> ChoiceChip(t, t in tags, { if (t in tags) tags.remove(t) else tags.add(t) }) }
-            }
-        }
-        Spacer(Modifier.height(24.dp))
-        DnaButton("Done", { vm.rate(stars, tags.toList()) }, Modifier.fillMaxWidth(), enabled = stars > 0)
-        Text("Skip", style = DnaType.mainBody.copy(fontWeight = FontWeight.SemiBold), color = c.textSecondary, textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth().padding(top = 16.dp).clickableNoIndication { vm.skipRating() })
+        PillButton("Done", { vm.rate(stars, tags.toList()) }, Modifier.fillMaxWidth(), enabled = stars > 0)
+        Text("Skip", style = T.label.copy(color = OC.muted), textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().tap { vm.skipRating() })
     }
 }

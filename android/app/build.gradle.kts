@@ -1,9 +1,15 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
+    id("com.google.gms.google-services")
 }
+
+// Keys live in local.properties (gitignored), never in the public repo.
+val localProps = Properties().also { p -> rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { p.load(it) } }
 android {
     namespace = "pk.oneclick.app"
     compileSdk = 35
@@ -12,7 +18,8 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1-demo"
+        versionName = "0.2"
+        manifestPlaceholders["MAPS_API_KEY"] = localProps.getProperty("MAPS_API_KEY", "")
     }
     buildTypes {
         release {
@@ -25,7 +32,6 @@ android {
     }
     buildFeatures { compose = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
-    kotlinOptions { jvmTarget = "17" }
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
@@ -46,7 +52,13 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
-    implementation("org.osmdroid:osmdroid-android:6.1.20")
+    implementation("androidx.core:core-splashscreen:1.0.1")
+    implementation("androidx.lifecycle:lifecycle-process:2.8.7")
+    implementation("com.google.maps.android:maps-compose:6.2.1")
+    implementation("com.google.android.gms:play-services-maps:19.0.0")
+    implementation(platform("com.google.firebase:firebase-bom:35.2.0"))
+    implementation("com.google.firebase:firebase-analytics")
+    implementation("com.google.firebase:firebase-messaging")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("io.github.takahirom.roborazzi:roborazzi:1.32.2")
@@ -55,3 +67,5 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 }
+
+kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }

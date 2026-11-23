@@ -16,12 +16,37 @@ class BackendTest {
     private fun asProvider() { user = Backend.PROVIDER_ID; mode = ActiveMode.PROVIDER }
     private fun asCustomer() { user = Backend.CUSTOMER_ID; mode = ActiveMode.CUSTOMER }
 
-    @Test fun onlyTwoAccounts() {
-        assertEquals(listOf("customer", "provider"), api.accounts().map { it.role })
+    @Test fun seededPeople() {
+        assertEquals(1, api.accounts().count { it.role == "customer" })
+        assertEquals(6, api.accounts().count { it.role == "provider" })
+    }
+
+    @Test fun signIn_existingNewAndInvalidNumbers() = runTest {
+        assertEquals(Backend.CUSTOMER_ID, api.signIn("0300 1110001", "").id)
+        assertEquals(Backend.PROVIDER_ID, api.signIn("+92 300 1110012", "").id)
+        assertThrows(AppError::class.java) { runBlocking { api.signIn("0421234567", "Ali") } }
+        assertThrows(AppError::class.java) { runBlocking { api.signIn("03214567890", "A") } }
+        val u = api.signIn("0321-4567890", "  Zara   Ahmed ")
+        assertEquals("Zara Ahmed", u.name); assertEquals("+923214567890", u.phone); assertEquals("customer", u.role)
+        user = u.id
+        assertEquals(Backend.WELCOME_CREDIT, api.wallet().first.balance)
+        assertEquals(u.id, api.findByPhone("03214567890")!!.id)
+    }
+
+    @Test fun electrician_getsOffersFromTwoProviders_acceptOneDeclinesOther() = runTest {
+        api.createRequest("electrician", "Fan", 700)
+        wait(4_500); assertEquals(1, api.activeJob()!!.offers.size)
+        wait(3_000)
+        val offers = api.activeJob()!!.offers
+        assertEquals(setOf("Ahmad Khan", "Sara Iqbal"), offers.map { it.providerName }.toSet())
+        assertEquals(listOf(700L, 750L), offers.map { it.amount }.sorted())
+        api.acceptOffer(api.activeJob()!!.id, offers.minBy { it.amount }.id)
+        val j = api.activeJob()!!
+        assertEquals("accepted", j.status); assertTrue(j.offers.isEmpty())
     }
 
     @Test fun customerFullFlow_offerAtPrice_escrow_commission_rating() = runTest {
-        assertEquals(1, api.mapProviders().size)
+        assertEquals(6, api.mapProviders().size)
         api.createRequest("plumber", "Geyser leaking", 800)
         assertTrue(api.activeJob()!!.offers.isEmpty())
         wait(5_000)
@@ -30,7 +55,7 @@ class BackendTest {
         api.acceptOffer(api.activeJob()!!.id, o.id)
         assertEquals("accepted", api.activeJob()!!.status)
         api.wallet().first.let { assertEquals(4200, it.balance); assertEquals(800, it.escrow) }
-        assertTrue(api.mapProviders().isEmpty()) // provider busy → hidden from map
+        assertEquals(5, api.mapProviders().size) // busy provider hidden from map
         wait(4_000); assertEquals("en_route", api.activeJob()!!.status)
         wait(30_000); assertEquals(1, api.activeJob()!!.etaMin)
         wait(31_000); assertEquals("arrived", api.activeJob()!!.status)
@@ -65,7 +90,7 @@ class BackendTest {
     }
 
     @Test fun raiseFare_offerExpires_requestTimesOut() = runTest {
-        api.createRequest("electrician", "", 500)
+        api.createRequest("plumber", "", 500)
         api.raiseFare(api.activeJob()!!.id, 550)
         assertEquals(550, api.activeJob()!!.fare)
         wait(5_000); assertEquals(1, api.activeJob()!!.offers.size)
@@ -81,7 +106,7 @@ class BackendTest {
         api.acceptOffer(api.activeJob()!!.id, api.activeJob()!!.offers.single().id)
         api.cancel(api.activeJob()!!.id)
         api.wallet().first.let { assertEquals(5000, it.balance); assertEquals(0, it.escrow) }
-        assertEquals(1, api.mapProviders().size)
+        assertEquals(6, api.mapProviders().size)
     }
 
     @Test fun cannotConfirmBeforePhoto_orAcceptWithoutFunds() = runTest {

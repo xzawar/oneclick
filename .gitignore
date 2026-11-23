@@ -3,3 +3,4 @@ android/build/
 android/app/build/
 android/local.properties
 android/OneClick-demo.apk
+android/app/google-services.json
