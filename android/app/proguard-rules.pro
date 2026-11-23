@@ -8,3 +8,6 @@
 -dontwarn com.google.errorprone.annotations.RestrictedApi
 -dontwarn javax.annotation.Nullable
 -dontwarn javax.annotation.concurrent.GuardedBy
+
+# WebView map bridge: methods called from the page by name.
+-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }
