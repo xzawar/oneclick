@@ -129,8 +129,9 @@ fun SignIn(vm: AppViewModel, onBack: (() -> Unit)?) {
     val s by vm.state.collectAsState()
     var phone by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
-    val known = remember(phone) { vm.lookup(phone) }
     val valid = Backend.normalizePhone(phone) != null
+    var known by remember { mutableStateOf<DbUser?>(null) }
+    LaunchedEffect(phone) { known = if (valid) vm.lookup(phone) else null }
     if (onBack != null) BackHandler(onBack = onBack)
     Screen(title = if (onBack == null) "Sign in" else "Add account",
         subtitle = "Use your mobile number. We’ll keep you signed in on this phone.", onBack = onBack, bottomPad = 32.dp,
@@ -138,7 +139,8 @@ fun SignIn(vm: AppViewModel, onBack: (() -> Unit)?) {
         Field(phone, { phone = it.filter { c -> c.isDigit() || c == ' ' }.take(14) }, "0300 1234567", label = "Mobile number", phone = true,
             error = if (phone.length >= 11 && !valid) "Enter a valid Pakistani mobile number" else null)
         AnimatedVisibility(valid) {
-            if (known != null) Note("Welcome back, ${known.name}", gold = true)
+            val k = known
+            if (k != null) Note("Welcome back, ${k.name}", gold = true)
             else Field(name, { name = it.take(40) }, "Full name", label = "Your name")
         }
         PillButton("Continue", { vm.signIn(phone, name) }, Modifier.fillMaxWidth(),
@@ -341,8 +343,7 @@ fun ProfileTab(s: UiState, vm: AppViewModel) {
             }
             Card {
                 ListRow("Sign out", icon = Icons.Outlined.Logout, titleColor = OC.red, onClick = { confirmOut = true })
-                Hr()
-                ListRow("Reset demo data", subtitle = "Clears bookings and wallets on this phone", icon = Icons.Outlined.RestartAlt, onClick = { vm.reset() })
+                if (s.local) { Hr(); ListRow("Reset demo data", subtitle = "Clears bookings and wallets on this phone", icon = Icons.Outlined.RestartAlt, onClick = { vm.reset() }) }
             }
         }
         if (switcher) OverlaySheet({ switcher = false }) {

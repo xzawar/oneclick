@@ -43,12 +43,12 @@ enum class ActiveMode { CUSTOMER, PROVIDER }
 
 // ---------- views for the UI ----------
 data class Category(val slug: String, val name: String, val recommendedFare: Long)
-data class MapProvider(val id: String, val name: String, val category: String, val rating: Double, val lat: Double, val lng: Double)
-data class OfferView(
+@Serializable data class MapProvider(val id: String, val name: String, val category: String, val rating: Double, val lat: Double, val lng: Double)
+@Serializable data class OfferView(
     val id: String, val providerName: String, val amount: Long, val etaMin: Int, val distanceKm: Double,
     val rating: Double, val ratingCount: Int, val jobs: Int, val secondsLeft: Int, val isCounter: Boolean,
 )
-data class JobView(
+@Serializable data class JobView(
     val id: String, val status: String, val category: String, val description: String, val fare: Long,
     val isCustomer: Boolean, val otherName: String, val otherRating: Double, val otherRatingCount: Int,
     val lat: Double, val lng: Double, val providerLat: Double, val providerLng: Double,
@@ -56,13 +56,13 @@ data class JobView(
     val photo: String?, val cancelReason: String?, val offers: List<OfferView>, val searchSeconds: Int,
     val net: Long,
 )
-data class RequestView(
+@Serializable data class RequestView(
     val id: String, val customerName: String, val customerRating: Double, val category: String,
     val description: String, val fare: Long, val distanceKm: Double, val postedSecondsAgo: Int,
     val myOffer: Long?, val myOfferStatus: String?, val myOfferSecondsLeft: Int,
 )
-data class TxnView(val title: String, val amount: Long, val incoming: Boolean, val status: String, val ref: String?, val createdAt: Long)
-data class Me(val user: DbUser, val wallet: DbWallet, val provider: DbProvider?)
+@Serializable data class TxnView(val title: String, val amount: Long, val incoming: Boolean, val status: String, val ref: String?, val createdAt: Long)
+@Serializable data class Me(val user: DbUser, val wallet: DbWallet, val provider: DbProvider?)
 
 /**
  * On-device backend. Same rules as the server spec: escrow hold on accept, 15% commission on release,
@@ -75,7 +75,7 @@ class Backend(
     private val user: () -> String?,
     private val mode: () -> ActiveMode,
     private val clock: () -> Long = System::currentTimeMillis,
-) {
+) : Api {
     private val lock = Mutex()
     private var db: Db = runCatching { JSON.decodeFromString(Db.serializer(), file.readText()) }.getOrElse { seed(clock()) }
     private val me get() = user() ?: throw AppError("Sign in first")
@@ -286,9 +286,12 @@ class Backend(
     fun accounts(): List<DbUser> = db.users
 
     fun findByPhone(phone: String): DbUser? = normalizePhone(phone)?.let { n -> db.users.firstOrNull { it.phone == n } }
+    override suspend fun lookup(phone: String): DbUser? = findByPhone(phone)
 
     /** Sign in with a Pakistani mobile number. New numbers become customer accounts with Rs 1,000 welcome credit. */
-    suspend fun signIn(phone: String, name: String): DbUser = lock.withLock {
+    override suspend fun signIn(phone: String, name: String): SignedIn = SignedIn(signInUser(phone, name).let { it }, "").let { it.copy(token = it.user.id) }
+
+    suspend fun signInUser(phone: String, name: String): DbUser = lock.withLock {
         val n = normalizePhone(phone) ?: throw AppError("Enter a valid mobile number, e.g. 0300 1234567")
         db.users.firstOrNull { it.phone == n }?.let { return@withLock it }
         val clean = name.trim().replace(Regex("\\s+"), " ")
@@ -301,16 +304,16 @@ class Backend(
         u
     }
 
-    suspend fun me(): Me = tx { d ->
+    override suspend fun me(): Me = tx { d ->
         d to Me(d.user(me), d.wallet(me), d.providers.firstOrNull { it.userId == me })
     }
 
-    suspend fun mapProviders(): List<MapProvider> = tx { d ->
+    override suspend fun mapProviders(): List<MapProvider> = tx { d ->
         d to d.providers.filter { it.userId != me && it.isOnline && !it.isOnJob && d.wallet(it.userId).balance >= MIN_BALANCE }
             .map { MapProvider(it.userId, d.user(it.userId).name, it.categories.first(), it.rating, it.lat, it.lng) }
     }
 
-    suspend fun activeJob(): JobView? = tx { d ->
+    override suspend fun activeJob(): JobView? = tx { d ->
         val prov = mode() == ActiveMode.PROVIDER
         val b = d.bookings.sortedByDescending { it.createdAt }.firstOrNull {
             (if (prov) it.providerId == me else it.customerId == me) && (it.status in ACTIVE ||
@@ -320,17 +323,17 @@ class Backend(
         d to b?.let { d.jobView(it, me) }
     }
 
-    suspend fun createRequest(category: String, description: String, fare: Long): JobView = tx { d ->
+    override suspend fun createRequest(category: String, description: String, fare: Long): Unit = tx { d ->
         if (mode() != ActiveMode.CUSTOMER) throw AppError("Switch to customer mode")
         if (fare !in MIN_FARE..MAX_FARE) throw AppError("Fare must be ${rs(MIN_FARE)}–${rs(MAX_FARE)}")
         if (d.bookings.any { it.customerId == me && it.status in ACTIVE }) throw AppError("You already have an active request")
         if (d.wallet(me).balance < fare) throw AppError("Not enough in wallet. Top up first")
         val b = DbBooking(UUID.randomUUID().toString(), me, null, category, description.trim().take(200), "pending", fare,
             lat = HOME_LAT, lng = HOME_LNG, createdAt = now, expiresAt = now + SEARCH_MS, stepAt = now)
-        d.copy(bookings = d.bookings + b).let { it to it.jobView(b, me) }
+        d.copy(bookings = d.bookings + b) to Unit
     }
 
-    suspend fun raiseFare(id: String, newFare: Long) = tx { d ->
+    override suspend fun raiseFare(id: String, newFare: Long) = tx { d ->
         val b = d.booking(id)
         if (b.customerId != me || b.status != "pending") throw AppError("Request is no longer active")
         if (newFare <= b.fare || newFare > MAX_FARE) throw AppError("Maximum fare reached")
@@ -338,26 +341,26 @@ class Backend(
         d.put(b.copy(fare = newFare, stepAt = now, expiresAt = now + SEARCH_MS)) to Unit
     }
 
-    suspend fun acceptOffer(id: String, offerId: String) = tx { d ->
+    override suspend fun acceptOffer(id: String, offerId: String) = tx { d ->
         val b = d.booking(id)
         if (b.customerId != me) throw AppError("Not your request")
         d.acceptOffer(b, offerId) to Unit
     }
 
-    suspend fun declineOffer(id: String, offerId: String) = tx { d ->
+    override suspend fun declineOffer(id: String, offerId: String) = tx { d ->
         val b = d.booking(id)
         if (b.customerId != me) throw AppError("Not your request")
         d.put(b.copy(offers = b.offers.map { if (it.id == offerId && it.status == "open") it.copy(status = "declined") else it })) to Unit
     }
 
-    suspend fun cancel(id: String) = tx { d ->
+    override suspend fun cancel(id: String) = tx { d ->
         val b = d.booking(id)
         if (b.customerId != me && b.providerId != me) throw AppError("Not your booking")
         d.cancel(b, if (b.customerId == me) "customer_cancelled" else "provider_cancelled") to Unit
     }
 
     // provider
-    suspend fun setOnline(online: Boolean) = tx { d ->
+    override suspend fun setOnline(online: Boolean) = tx { d ->
         if (mode() != ActiveMode.PROVIDER) throw AppError("Switch to provider mode")
         val p = d.provider(me)
         if (online && !p.verified) throw AppError("Verification pending")
@@ -365,7 +368,7 @@ class Backend(
         d.put(p.copy(isOnline = online)).copy(lastBotRequestAt = now - 7_000) to Unit
     }
 
-    suspend fun requests(): List<RequestView> = tx { d ->
+    override suspend fun requests(): List<RequestView> = tx { d ->
         val p = d.providers.firstOrNull { it.userId == me }
         if (p == null || !p.isOnline || p.isOnJob) return@tx d to emptyList()
         d to d.bookings.filter { it.status == "pending" && it.customerId != me && it.category in p.categories &&
@@ -379,7 +382,7 @@ class Backend(
             }
     }
 
-    suspend fun makeOffer(id: String, amount: Long) = tx { d ->
+    override suspend fun makeOffer(id: String, amount: Long) = tx { d ->
         if (mode() != ActiveMode.PROVIDER) throw AppError("Switch to provider mode")
         val p = d.provider(me)
         if (!p.isOnline || p.isOnJob) throw AppError("Go online to send offers")
@@ -391,13 +394,13 @@ class Backend(
         d.put(b.copy(offers = b.offers + DbOffer(UUID.randomUUID().toString(), me, amount, now, now + OFFER_MS))) to Unit
     }
 
-    suspend fun advance(id: String, next: String) = tx { d ->
+    override suspend fun advance(id: String, next: String) = tx { d ->
         val b = d.booking(id)
         if (b.providerId != me) throw AppError("Not your job")
         d.step(b, next) to Unit
     }
 
-    suspend fun complete(id: String, photoPath: String) = tx { d ->
+    override suspend fun complete(id: String, photoPath: String) = tx { d ->
         val b = d.booking(id)
         if (b.providerId != me) throw AppError("Not your job")
         if (b.status != "in_progress") throw AppError("Start the job first")
@@ -405,7 +408,7 @@ class Backend(
         d.put(b.copy(photo = photoPath, stepAt = now)) to Unit
     }
 
-    suspend fun confirm(id: String) = tx { d ->
+    override suspend fun confirm(id: String) = tx { d ->
         val b = d.booking(id)
         if (b.customerId != me) throw AppError("Only the customer can confirm")
         val paid = d.release(b)
@@ -413,24 +416,24 @@ class Backend(
         (if (b.providerId != me) paid.rateInternal(paid.booking(id), b.providerId!!, 5, listOf("Friendly")) else paid) to Unit
     }
 
-    suspend fun dispute(id: String, reason: String) = tx { d ->
+    override suspend fun dispute(id: String, reason: String) = tx { d ->
         val b = d.booking(id)
         if (b.customerId != me) throw AppError("Only the customer can report a problem")
         if (b.status !in listOf("arrived", "in_progress")) throw AppError("Not available right now")
         d.put(b.copy(status = "disputed", cancelReason = reason, stepAt = now)) to Unit
     }
 
-    suspend fun rate(id: String, score: Int, tags: List<String>) = tx { d ->
+    override suspend fun rate(id: String, score: Int, tags: List<String>) = tx { d ->
         val b = d.booking(id)
         if (b.status != "completed") throw AppError("Rate after the job is done")
         if (score !in 1..5) throw AppError("Choose 1–5 stars")
         d.rateInternal(b, me, score, tags) to Unit
     }
 
-    suspend fun skipRating(id: String) = rate(id, 5, emptyList())
+    override suspend fun skipRating(id: String) = rate(id, 5, emptyList())
 
     // wallet
-    suspend fun wallet(): Pair<DbWallet, List<TxnView>> = tx { d ->
+    override suspend fun wallet(): Pair<DbWallet, List<TxnView>> = tx { d ->
         // Each person sees only their own money movements: the customer sees the held payment (and refunds),
         // the provider sees net earnings. The service fee is internal to the platform.
         d to (d.wallet(me) to d.txns.filter {
@@ -444,7 +447,7 @@ class Backend(
         })
     }
 
-    suspend fun topup(amount: Long, tid: String) = tx { d ->
+    override suspend fun topup(amount: Long, tid: String) = tx { d ->
         if (amount !in 100..50_000) throw AppError("Amount must be Rs. 100–50,000")
         val ref = tid.trim().uppercase()
         if (!Regex("^[A-Z0-9-]{6,20}$").matches(ref)) throw AppError("Enter the 6–20 character TID")
@@ -453,19 +456,19 @@ class Backend(
         d.put(w.copy(balance = w.balance + amount)).txn(null, null, me, amount, "wallet_topup", "approved", ref) to Unit
     }
 
-    suspend fun withdraw(amount: Long) = tx { d ->
+    override suspend fun withdraw(amount: Long) = tx { d ->
         val w = d.wallet(me)
         if (amount < 500) throw AppError("Minimum withdrawal is Rs. 500")
         if (amount > w.balance) throw AppError("Not enough balance")
         d.put(w.copy(balance = w.balance - amount)).txn(null, me, null, amount, "withdrawal", "pending") to Unit
     }
 
-    suspend fun history(): List<JobView> = tx { d ->
+    override suspend fun history(): List<JobView> = tx { d ->
         d to d.bookings.filter { (it.customerId == me && !(it.byBot && it.status == "cancelled")) || it.providerId == me }
             .sortedByDescending { it.createdAt }.take(30).map { d.jobView(it, me) }
     }
 
-    suspend fun sos() = tx { d -> d.copy(sosCount = d.sosCount + 1) to Unit }
+    override suspend fun sos() = tx { d -> d.copy(sosCount = d.sosCount + 1) to Unit }
 
     suspend fun reset() = lock.withLock { db = seed(now); file.delete() }
 

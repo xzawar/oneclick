@@ -22,11 +22,11 @@ class BackendTest {
     }
 
     @Test fun signIn_existingNewAndInvalidNumbers() = runTest {
-        assertEquals(Backend.CUSTOMER_ID, api.signIn("0300 1110001", "").id)
-        assertEquals(Backend.PROVIDER_ID, api.signIn("+92 300 1110012", "").id)
-        assertThrows(AppError::class.java) { runBlocking { api.signIn("0421234567", "Ali") } }
-        assertThrows(AppError::class.java) { runBlocking { api.signIn("03214567890", "A") } }
-        val u = api.signIn("0321-4567890", "  Zara   Ahmed ")
+        assertEquals(Backend.CUSTOMER_ID, api.signInUser("0300 1110001", "").id)
+        assertEquals(Backend.PROVIDER_ID, api.signInUser("+92 300 1110012", "").id)
+        assertThrows(AppError::class.java) { runBlocking { api.signInUser("0421234567", "Ali") } }
+        assertThrows(AppError::class.java) { runBlocking { api.signInUser("03214567890", "A") } }
+        val u = api.signInUser("0321-4567890", "  Zara   Ahmed ")
         assertEquals("Zara Ahmed", u.name); assertEquals("+923214567890", u.phone); assertEquals("customer", u.role)
         user = u.id
         assertEquals(Backend.WELCOME_CREDIT, api.wallet().first.balance)

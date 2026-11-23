@@ -45,6 +45,12 @@ class Session(ctx: Context) {
     var pushToken: String?
         get() = prefs.getString("push_token", null)
         set(v) = prefs.edit().putString("push_token", v).apply()
+
+    /** Signed-in accounts on this phone, each with its own server session token. */
+    var profiles: List<SignedIn>
+        get() = runCatching { kotlinx.serialization.json.Json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(SignedIn.serializer()), prefs.getString("profiles", "[]")!!) }.getOrDefault(emptyList())
+        set(v) = prefs.edit().putString("profiles", kotlinx.serialization.json.Json.encodeToString(kotlinx.serialization.builtins.ListSerializer(SignedIn.serializer()), v)).apply()
+    val token: String? get() = profiles.firstOrNull { it.user.id == userId }?.token
 }
 
 /** App clock. Tests move [skew] forward to fast-forward the other side. */
@@ -69,14 +75,17 @@ data class UiState(
     val history: List<JobView> = emptyList(),
     val accounts: List<DbUser> = emptyList(),
     val notifications: Boolean = true,
+    val local: Boolean = false,
     val message: String? = null,
     val busy: Boolean = false,
 )
 
 class AppViewModel(private val app: Application) : AndroidViewModel(app) {
     private val session = Session(app)
-    private val api = Backend(File(app.filesDir, "oneclick-db.json"), { session.userId }, { session.mode }, { DemoClock.now() })
-    private val _s = MutableStateFlow(UiState(notifications = session.notifications))
+    // Live server on phones; the on-device engine only for JVM tests (no network there).
+    private val api: Api = if (isJvmTest) Backend(File(app.filesDir, "oneclick-db.json"), { session.userId }, { session.mode }, { DemoClock.now() })
+        else RemoteApi(BuildConfig.API_BASE_URL, { session.token }, { session.mode })
+    private val _s = MutableStateFlow(UiState(notifications = session.notifications, local = isJvmTest))
     val state: StateFlow<UiState> = _s
     private var poller: Job? = null
     private var lastJobKey: String? = null
@@ -93,10 +102,12 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
     fun finishOnboarding() { session.onboarded = true; _s.update { it.copy(stage = Stage.SignIn) } }
 
     // ---------- accounts ----------
-    fun lookup(phone: String) = api.findByPhone(phone)
+    suspend fun lookup(phone: String): DbUser? = runCatching { api.lookup(phone) }.getOrNull()
 
     fun signIn(phone: String, name: String) = op {
-        val u = api.signIn(phone, name)
+        val signed = api.signIn(phone, name)
+        val u = signed.user
+        session.profiles = session.profiles.filter { it.user.id != u.id } + signed
         session.userId = u.id
         session.accounts = session.accounts + u.id
         session.mode = if (u.role == "provider") ActiveMode.PROVIDER else ActiveMode.CUSTOMER
@@ -106,7 +117,7 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun switchAccount(id: String) {
-        val u = api.accounts().firstOrNull { it.id == id } ?: return
+        val u = session.profiles.firstOrNull { it.user.id == id }?.user ?: return
         session.userId = u.id
         session.mode = if (u.role == "provider") ActiveMode.PROVIDER else ActiveMode.CUSTOMER
         _s.update { it.copy(tab = Tab.Home, page = null, job = null, requests = emptyList(), me = null) }
@@ -117,19 +128,26 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
     fun signOut() {
         poller?.cancel()
         val left = session.accounts - (session.userId ?: "")
+        session.profiles = session.profiles.filter { it.user.id != session.userId }
         session.accounts = left
         session.userId = null
-        _s.update { UiState(stage = Stage.SignIn, launching = false, notifications = session.notifications) }
+        _s.update { UiState(stage = Stage.SignIn, launching = false, notifications = session.notifications, local = isJvmTest) }
         left.firstOrNull()?.let { switchAccount(it); _s.update { s -> s.copy(stage = Stage.App) } }
     }
 
     fun setNotifications(on: Boolean) { session.notifications = on; _s.update { it.copy(notifications = on) } }
 
     private fun start() {
-        _s.update { it.copy(mode = session.mode, accounts = session.accounts.mapNotNull { id -> api.accounts().firstOrNull { it.id == id } }) }
+        _s.update { it.copy(mode = session.mode, accounts = session.profiles.map { p -> p.user }) }
         lastJobKey = null; lastRequestIds = emptySet()
         poller?.cancel()
-        poller = viewModelScope.launch { while (isActive) { runCatching { refresh() }; delay(1000) } }
+        poller = viewModelScope.launch {
+            session.pushToken?.let { runCatching { api.registerPush(it) } }
+            while (isActive) {
+                runCatching { refresh() }.onFailure { e -> if (e is AppError && e.message?.startsWith("Session expired") == true) signOut() }
+                delay(if (isJvmTest) 1000 else 2000)
+            }
+        }
     }
 
     private suspend fun refresh() {
@@ -185,7 +203,10 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
     private fun registerPush() {
         if (isJvmTest) return
         runCatching {
-            com.google.firebase.messaging.FirebaseMessaging.getInstance().token.addOnSuccessListener { session.pushToken = it }
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().token.addOnSuccessListener { t ->
+                session.pushToken = t
+                if (session.userId != null) viewModelScope.launch { runCatching { api.registerPush(t) } }
+            }
         }
     }
 
@@ -215,8 +236,8 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
     fun withdraw(amount: Long) = op { api.withdraw(amount); toast("Withdrawal requested") }
     fun sos() = op { api.sos(); toast("SOS sent. Our team and your contacts are notified") }
     fun reset() = viewModelScope.launch {
-        poller?.cancel(); api.reset(); session.accounts = emptyList(); session.userId = null
-        _s.value = UiState(stage = Stage.SignIn, launching = false, notifications = session.notifications)
+        poller?.cancel(); (api as? Backend)?.reset(); session.accounts = emptyList(); session.profiles = emptyList(); session.userId = null
+        _s.value = UiState(stage = Stage.SignIn, launching = false, notifications = session.notifications, local = isJvmTest)
     }
 
     fun toast(m: String) = _s.update { it.copy(message = m) }

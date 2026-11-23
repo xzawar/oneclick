@@ -19,6 +19,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.2"
+        buildConfigField("String", "API_BASE_URL", "\"https://diyipvjaxjkacwrszmda.supabase.co/functions/v1/api\"")
         manifestPlaceholders["MAPS_API_KEY"] = localProps.getProperty("MAPS_API_KEY", "")
     }
     buildTypes {
@@ -30,7 +31,7 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     testOptions {
         unitTests {
@@ -39,6 +40,7 @@ android {
                 it.systemProperty("robolectric.graphicsMode", "NATIVE")
                 it.systemProperty("roborazzi.test.record", "true")
                 it.maxHeapSize = "2g"
+                it.systemProperty("live", System.getProperty("live") ?: "false")
             }
         }
     }
@@ -52,6 +54,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("androidx.lifecycle:lifecycle-process:2.8.7")
     implementation("com.google.maps.android:maps-compose:6.2.1")

@@ -317,8 +317,21 @@ private fun CustomerJob(job: JobView, s: UiState, vm: AppViewModel) {
 
 @Composable
 fun ProofPhoto(path: String?) {
-    val bmp = remember(path) { path?.takeIf { File(it).exists() }?.let { BitmapFactory.decodeFile(it) } }
-    if (bmp != null) Image(bmp.asImageBitmap(), "Photo proof", Modifier.fillMaxWidth().height(170.dp).clip(Radius.lg), contentScale = ContentScale.Crop)
+    // Local file (tests) or short-lived signed link from private storage (live).
+    val bmp by produceState<android.graphics.Bitmap?>(null, path) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                when {
+                    path == null -> null
+                    path.startsWith("https://") -> java.net.URL(path).openStream().use { BitmapFactory.decodeStream(it) }
+                    File(path).exists() -> BitmapFactory.decodeFile(path)
+                    else -> null
+                }
+            }.getOrNull()
+        }
+    }
+    val b = bmp
+    if (b != null) Image(b.asImageBitmap(), "Photo proof", Modifier.fillMaxWidth().height(170.dp).clip(Radius.lg), contentScale = ContentScale.Crop)
     else Card { ListRow("Photo proof attached", subtitle = "Taken when the job was finished", icon = Icons.Outlined.PhotoCamera) }
 }
 
