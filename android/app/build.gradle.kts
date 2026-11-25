@@ -17,8 +17,8 @@ android {
         applicationId = "pk.oneclick.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.2"
+        versionCode = 4
+        versionName = "0.4"
         buildConfigField("String", "API_BASE_URL", "\"https://diyipvjaxjkacwrszmda.supabase.co/functions/v1/api\"")
         buildConfigField("String", "MAPS_KEY", "\"${localProps.getProperty("MAPS_API_KEY", "")}\"")
     }

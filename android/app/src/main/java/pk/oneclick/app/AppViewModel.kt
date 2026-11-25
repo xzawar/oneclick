@@ -42,6 +42,9 @@ class Session(ctx: Context) {
     var notifications: Boolean
         get() = prefs.getBoolean("notifications", true)
         set(v) = prefs.edit().putBoolean("notifications", v).apply()
+    var dismissed: Set<String>
+        get() = prefs.getStringSet("dismissed", emptySet())!!.toSet()
+        set(v) = prefs.edit().putStringSet("dismissed", v).apply()
     var pushToken: String?
         get() = prefs.getString("push_token", null)
         set(v) = prefs.edit().putString("push_token", v).apply()
@@ -58,7 +61,7 @@ object DemoClock { @Volatile var skew = 0L; fun now() = System.currentTimeMillis
 
 enum class Stage { Onboarding, SignIn, App }
 enum class Tab { Home, Bookings, Wallet, Profile }
-enum class Page { Safety, Help, About, AddAccount }
+enum class Page { Book, Track, Safety, Help, About, AddAccount }
 
 data class UiState(
     val stage: Stage = Stage.Onboarding,
@@ -76,6 +79,8 @@ data class UiState(
     val accounts: List<DbUser> = emptyList(),
     val notifications: Boolean = true,
     val local: Boolean = false,
+    val dismissed: Set<String> = emptySet(),
+    val bookCategory: String? = null,
     val message: String? = null,
     val busy: Boolean = false,
 )
@@ -85,11 +90,12 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
     // Live server on phones; the on-device engine only for JVM tests (no network there).
     private val api: Api = if (isJvmTest) Backend(File(app.filesDir, "oneclick-db.json"), { session.userId }, { session.mode }, { DemoClock.now() })
         else RemoteApi(BuildConfig.API_BASE_URL, { session.token }, { session.mode })
-    private val _s = MutableStateFlow(UiState(notifications = session.notifications, local = isJvmTest))
+    private val _s = MutableStateFlow(UiState(notifications = session.notifications, local = isJvmTest, dismissed = session.dismissed))
     val state: StateFlow<UiState> = _s
     private var poller: Job? = null
     private var lastJobKey: String? = null
     private var lastRequestIds: Set<String> = emptySet()
+    private var ticks = 0
 
     init {
         val user = session.userId
@@ -154,15 +160,21 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
         if (session.userId == null) return
         val me = api.me()
         val job = api.activeJob()
+        val prevJob = _s.value.job
         if (session.mode == ActiveMode.PROVIDER) {
             val req = api.requests()
             notifyRequests(req)
             _s.update { it.copy(me = me, job = job, requests = req) }
         } else _s.update { it.copy(me = me, job = job, mapProviders = api.mapProviders()) }
         notifyJob(job)
+        // A provider whose offer was just accepted goes straight to the job screen.
+        if (session.mode == ActiveMode.PROVIDER && job != null && job.status == "accepted" && prevJob?.id != job.id && _s.value.page == null)
+            _s.update { it.copy(page = Page.Track) }
+        val historyDue = isJvmTest || ticks++ % 5 == 0 || prevJob?.status != job?.status
         when (_s.value.tab) {
             Tab.Wallet -> api.wallet().let { (w, t) -> _s.update { it.copy(wallet = w, txns = t) } }
             Tab.Bookings -> api.history().let { h -> _s.update { it.copy(history = h) } }
+            Tab.Home -> if (historyDue) api.history().let { h -> _s.update { it.copy(history = h) } }
             else -> Unit
         }
     }
@@ -212,10 +224,18 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
 
     // ---------- navigation ----------
     fun tab(t: Tab) { _s.update { it.copy(tab = t) }; op { } }
-    fun open(p: Page?) = _s.update { it.copy(page = p) }
+    fun open(p: Page?) {
+        if (p == Page.Safety) dismiss("task-safety")
+        _s.update { it.copy(page = p) }
+    }
+    fun startBooking(category: String?) = _s.update { it.copy(page = Page.Book, bookCategory = category) }
+    fun dismiss(id: String) { session.dismissed = session.dismissed + id; _s.update { it.copy(dismissed = session.dismissed) } }
 
     // ---------- customer ----------
-    fun createRequest(category: String, description: String, fare: Long) = op { api.createRequest(category, description, fare) }
+    fun createRequest(category: String, description: String, fare: Long) = op {
+        api.createRequest(category, description, fare)
+        _s.update { it.copy(page = Page.Track) }
+    }
     fun raiseFare(newFare: Long) = job { api.raiseFare(it, newFare); toast("Fare raised to ${rs(newFare)}") }
     fun acceptOffer(offerId: String) = job { api.acceptOffer(it, offerId) }
     fun declineOffer(offerId: String) = job { api.declineOffer(it, offerId) }
