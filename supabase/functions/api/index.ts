@@ -22,6 +22,9 @@ const keyPromise = crypto.subtle.digest("SHA-256",
 
 const SEARCH_S = 180, OFFER_S = 30, TRAVEL_S = 60, MIN_BALANCE = 200, MIN_FARE = 300, MAX_FARE = 20000, WELCOME = 1000;
 const HOME = { lat: 31.5204, lng: 74.3587 };
+const inLahore = (lat: number, lng: number) => lat >= 31.35 && lat <= 31.65 && lng >= 74.15 && lng <= 74.5;
+const inPakistan = (lat: number, lng: number) => lat >= 23 && lat <= 37.5 && lng >= 60 && lng <= 78;
+const ARRIVE_KM = 0.3;
 const ACTIVE = ["pending", "accepted", "en_route", "arrived", "in_progress", "disputed"];
 const CATEGORIES: Record<string, number> = { plumber: 800, electrician: 700, mechanic: 1000, carpenter: 900, painter: 1500, welder: 1200 };
 const ISSUES: Record<string, string[]> = {
@@ -164,8 +167,8 @@ async function tick(tx: Tx, me: string | null, mode: string) {
         const fare = CATEGORIES[cat] + [-100, 0, 100, 200][Math.floor(Math.random() * 4)];
         const issue = (ISSUES[cat] ?? ["Repair needed"])[Math.floor(Math.random() * (ISSUES[cat]?.length ?? 1))];
         await ensureFunds(tx, cust.id, fare + 200);
-        await tx`insert into bookings (customer_id, category, description, agreed_fare, customer_lat, customer_lng, expires_at, by_bot)
-          values (${cust.id}, ${cat}, ${issue}, ${fare}, ${HOME.lat}, ${HOME.lng}, now() + interval '60 seconds', true)`;
+        await tx`insert into bookings (customer_id, category, description, agreed_fare, customer_lat, customer_lng, address, expires_at, by_bot)
+          values (${cust.id}, ${cat}, ${issue}, ${fare}, ${p.lat + 0.005}, ${p.lng - 0.003}, 'Pinned location near you', now() + interval '60 seconds', true)`;
         await tx`update provider_profiles set last_bot_request_at = now() where user_id = ${me}`;
       }
     }
@@ -175,6 +178,19 @@ async function tick(tx: Tx, me: string | null, mode: string) {
 /** Every free simulated provider in range answers, nearest first, a few seconds apart. */
 async function botOffers(tx: Tx, b: Row, now: number) {
   const rec = CATEGORIES[b.category];
+  const here = tx`extensions.st_setsrid(extensions.st_makepoint(${b.customer_lng}, ${b.customer_lat}), 4326)::extensions.geography`;
+  const [near] = await tx`select 1 from provider_profiles pp join users u on u.id = pp.user_id
+    where u.is_bot and pp.is_online and not pp.is_on_job and ${b.category} = any(pp.categories)
+      and extensions.st_dwithin(pp.geog, ${here}, pp.service_radius_km * 1000) limit 1`;
+  if (!near) {
+    const [far] = await tx`select pp.user_id from provider_profiles pp join users u on u.id = pp.user_id
+      where u.is_bot and pp.is_online and not pp.is_on_job and ${b.category} = any(pp.categories)
+      order by extensions.st_distance(pp.geog, ${here}) limit 1`;
+    if (far) {
+      const a = Math.random() * 2 * Math.PI, d = 0.008 + Math.random() * 0.006;
+      await tx`update provider_profiles set lat = ${b.customer_lat + d * Math.cos(a)}, lng = ${b.customer_lng + d * Math.sin(a)} where user_id = ${far.user_id}`;
+    }
+  }
   const pros = await tx`select pp.user_id from provider_profiles pp join users u on u.id = pp.user_id join wallets w on w.user_id = pp.user_id
     where u.is_bot and pp.is_online and not pp.is_on_job and ${b.category} = any(pp.categories) and w.balance >= ${MIN_BALANCE}
       and extensions.st_dwithin(pp.geog, extensions.st_setsrid(extensions.st_makepoint(${b.customer_lng}, ${b.customer_lat}), 4326)::extensions.geography, pp.service_radius_km * 1000)
@@ -199,14 +215,17 @@ async function customerRating(tx: Tx, id: string): Promise<[number, number]> {
 
 async function jobView(tx: Tx, b: Row, me: string) {
   const isCustomer = b.customer_id === me;
-  const [p] = b.provider_id ? await tx`select pp.*, u.name from provider_profiles pp join users u on u.id = pp.user_id where pp.user_id = ${b.provider_id}` : [null];
+  const [p] = b.provider_id ? await tx`select pp.*, u.name, u.is_bot from provider_profiles pp join users u on u.id = pp.user_id where pp.user_id = ${b.provider_id}` : [null];
   let pLat = p?.lat ?? b.customer_lat, pLng = p?.lng ?? b.customer_lng, eta: number | null = null;
-  if (b.status === "en_route" && b.start_lat != null && b.en_route_at) {
+  if (p && !p.is_bot) {
+    // Real provider: the pin is their phone's last GPS fix; ETA from the remaining distance (~20 km/h in city traffic).
+    if (b.status === "accepted" || b.status === "en_route") eta = Math.max(1, Math.ceil(km(pLat, pLng, b.customer_lat, b.customer_lng) * 3));
+  } else if (b.status === "en_route" && b.start_lat != null && b.en_route_at) {
     const f = Math.min(1, (tx.__now - ms(b.en_route_at)) / 1000 / TRAVEL_S);
     pLat = b.start_lat + (b.customer_lat - b.start_lat) * f; pLng = b.start_lng + (b.customer_lng - b.start_lng) * f;
     eta = Math.max(1, Math.ceil(((1 - f) * TRAVEL_S) / 60));
   } else if (b.status === "accepted" && p) eta = Math.max(1, Math.ceil(km(p.lat, p.lng, b.customer_lat, b.customer_lng) * 3));
-  if (b.status === "arrived" || b.status === "in_progress") { pLat = b.customer_lat; pLng = b.customer_lng; }
+  if (p?.is_bot && (b.status === "arrived" || b.status === "in_progress")) { pLat = b.customer_lat; pLng = b.customer_lng; }
   const [cu] = await tx`select name from users where id = ${b.customer_id}`;
   const [oRating, oCount] = isCustomer ? [p?.rating_avg ?? 0, p?.rating_count ?? 0] : await customerRating(tx, b.customer_id);
   const [rated] = await tx`select 1 from ratings where booking_id = ${b.id} and reviewer_id = ${me}`;
@@ -225,7 +244,7 @@ async function jobView(tx: Tx, b: Row, me: string) {
     otherName: isCustomer ? (p?.name ?? "") : cu.name, otherRating: oRating, otherRatingCount: oCount,
     lat: b.customer_lat, lng: b.customer_lng, providerLat: pLat, providerLng: pLng, etaMin: eta,
     distanceKm: round1(km(pLat, pLng, b.customer_lat, b.customer_lng)), awaitingConfirmation: awaiting, needsRating, photo,
-    cancelReason: b.cancel_reason,
+    cancelReason: b.cancel_reason, address: b.address,
     offers: offers.map((o: Row) => {
       const d = km(o.lat, o.lng, b.customer_lat, b.customer_lng);
       return { id: o.id, providerName: o.name, amount: o.amount, etaMin: Math.max(1, Math.ceil(d * 3)), distanceKm: round1(d),
@@ -328,8 +347,11 @@ async function route(req: Request, path: string): Promise<Response> {
       if (busy) fail("You already have an active request", 409);
       const [w] = await tx`select balance from wallets where user_id = ${me!}`;
       if (w.balance < fare) fail("Not enough in wallet. Top up first");
-      await tx`insert into bookings (customer_id, category, description, agreed_fare, customer_lat, customer_lng, expires_at)
-        values (${me!}, ${cat}, ${String(body.description ?? "").trim().slice(0, 200)}, ${fare}, ${HOME.lat}, ${HOME.lng}, now() + make_interval(secs => ${SEARCH_S}))`;
+      const lat = typeof body.lat === "number" ? body.lat : HOME.lat, lng = typeof body.lng === "number" ? body.lng : HOME.lng;
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || !inLahore(lat, lng)) fail("One Click works in Lahore for now. Choose a place in Lahore.");
+      const address = String(body.address ?? "").trim().slice(0, 120) || "Pinned location";
+      await tx`insert into bookings (customer_id, category, description, agreed_fare, customer_lat, customer_lng, address, expires_at)
+        values (${me!}, ${cat}, ${String(body.description ?? "").trim().slice(0, 200)}, ${fare}, ${lat}, ${lng}, ${address}, now() + make_interval(secs => ${SEARCH_S}))`;
       return json({ ok: true }, 201);
     }
 
@@ -344,7 +366,7 @@ async function route(req: Request, path: string): Promise<Response> {
         if (d > p.service_radius_km) continue;
         const [mine] = await tx`select * from fare_offers where booking_id = ${b.id} and provider_id = ${me!} order by created_at desc limit 1`;
         out.push({ id: b.id, customerName: b.name, customerRating: (await customerRating(tx, b.customer_id))[0], category: b.category,
-          description: b.description, fare: b.agreed_fare, distanceKm: round1(d), postedSecondsAgo: Math.floor((tx.__now - ms(b.created_at)) / 1000),
+          description: b.description, address: b.address, fare: b.agreed_fare, distanceKm: round1(d), postedSecondsAgo: Math.floor((tx.__now - ms(b.created_at)) / 1000),
           myOffer: mine?.amount ?? null, myOfferStatus: mine?.status ?? null,
           myOfferSecondsLeft: mine ? Math.max(0, Math.floor((ms(mine.expires_at) - tx.__now) / 1000)) : 0 });
       }
@@ -387,7 +409,18 @@ async function route(req: Request, path: string): Promise<Response> {
           await tx`insert into fare_offers (booking_id, provider_id, amount, expires_at) values (${id}, ${me!}, ${amount}, now() + make_interval(secs => ${OFFER_S}))`;
           break;
         }
-        case "advance": await step(tx, b, String(body.status)); break;
+        case "advance": {
+          if (String(body.status) === "arrived") {
+            // Real customers only: a simulated customer's pin is near the provider, so demos still work at a desk.
+            const [pp] = await tx`select pp.lat, pp.lng, pp.location_updated_at, cu.is_bot as customer_bot from provider_profiles pp
+              join users cu on cu.id = ${b.customer_id} where pp.user_id = ${me!}`;
+            const fresh = pp.location_updated_at && tx.__now - ms(pp.location_updated_at) < 120_000;
+            const d = km(pp.lat, pp.lng, b.customer_lat, b.customer_lng);
+            if (fresh && !pp.customer_bot && d > ARRIVE_KM) fail(`You’re still ${round1(d)} km away. Tap again when you’re at the door.`);
+          }
+          await step(tx, b, String(body.status));
+          break;
+        }
         case "complete": {
           if (b.status !== "in_progress") fail("Start the job first", 409);
           const b64 = String(body.photoBase64 ?? "");
@@ -429,6 +462,17 @@ async function route(req: Request, path: string): Promise<Response> {
       if (on && !p.is_verified) fail("Verification pending");
       if (on && p.balance < MIN_BALANCE) fail(`Top up to get requests — ${rs(MIN_BALANCE)} minimum`);
       await tx`update provider_profiles set is_online = ${on}, last_bot_request_at = now() - interval '7 seconds' where user_id = ${me!}`;
+      return json({ ok: true });
+    }
+
+    if (m === "PUT" && path === "/location") {
+      needProvider();
+      const lat = Number(body.lat), lng = Number(body.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || !inPakistan(lat, lng)) fail("Location looks wrong");
+      const r = await tx`update provider_profiles set lat = ${lat}, lng = ${lng}, location_updated_at = now() where user_id = ${me!} returning user_id`;
+      if (!r.length) fail("Not a provider", 403);
+      const [job] = await tx`select id from bookings where provider_id = ${me!} and status in ('accepted','en_route','arrived','in_progress') limit 1`;
+      if (job) await tx`insert into locations (booking_id, provider_id, lat, lng) values (${job.id}, ${me!}, ${lat}, ${lng})`;
       return json({ ok: true });
     }
 

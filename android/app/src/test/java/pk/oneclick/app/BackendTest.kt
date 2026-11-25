@@ -173,6 +173,20 @@ class BackendTest {
         assertThrows(AppError::class.java) { runBlocking { api.createRequest("plumber", "", 800) } }
     }
 
+    @Test fun location_requestsInLahoreOnly_addressShown_providerFixMovesPin() = runTest {
+        assertThrows(AppError::class.java) { runBlocking { api.createRequest("plumber", "", 800, Place(33.6844, 73.0479, "Islamabad")) } }
+        val johar = Place(31.4697, 74.2728, "Johar Town, Lahore")
+        api.createRequest("plumber", "Tap", 800, johar)
+        val j = api.activeJob()!!
+        assertEquals("Johar Town, Lahore", j.address); assertEquals(johar.lat, j.lat, 1e-9)
+        asProvider()
+        assertThrows(AppError::class.java) { runBlocking { api.updateLocation(51.5, 0.1) } }
+        api.updateLocation(31.5300, 74.3500)
+        assertEquals(31.5300, api.me().provider!!.lat, 1e-9)
+        asCustomer()
+        assertThrows(AppError::class.java) { runBlocking { api.updateLocation(31.53, 74.35) } }
+    }
+
     @Test fun commissionRounding() {
         assertEquals(120, Backend.commission(800)); assertEquals(105, Backend.commission(700)); assertEquals(53, Backend.commission(350))
     }

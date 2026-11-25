@@ -27,7 +27,7 @@ enum class ActiveMode { CUSTOMER, PROVIDER }
     val id: String, val customerId: String, val providerId: String? = null, val category: String,
     val description: String, val status: String, val fare: Long, val offers: List<DbOffer> = emptyList(),
     val lat: Double, val lng: Double, val startLat: Double? = null, val startLng: Double? = null,
-    val photo: String? = null, val cancelReason: String? = null, val createdAt: Long, val expiresAt: Long,
+    val photo: String? = null, val cancelReason: String? = null, val createdAt: Long, val expiresAt: Long, val address: String = "",
     val enRouteAt: Long? = null, val completedAt: Long? = null, val stepAt: Long, val byBot: Boolean = false,
 )
 @Serializable data class DbTxn(
@@ -54,12 +54,12 @@ data class Category(val slug: String, val name: String, val recommendedFare: Lon
     val lat: Double, val lng: Double, val providerLat: Double, val providerLng: Double,
     val etaMin: Int?, val distanceKm: Double, val awaitingConfirmation: Boolean, val needsRating: Boolean,
     val photo: String?, val cancelReason: String?, val offers: List<OfferView>, val searchSeconds: Int,
-    val net: Long,
+    val net: Long, val address: String = "",
 )
 @Serializable data class RequestView(
     val id: String, val customerName: String, val customerRating: Double, val category: String,
     val description: String, val fare: Long, val distanceKm: Double, val postedSecondsAgo: Int,
-    val myOffer: Long?, val myOfferStatus: String?, val myOfferSecondsLeft: Int,
+    val myOffer: Long?, val myOfferStatus: String?, val myOfferSecondsLeft: Int, val address: String = "",
 )
 @Serializable data class TxnView(val title: String, val amount: Long, val incoming: Boolean, val status: String, val ref: String?, val createdAt: Long)
 @Serializable data class Me(val user: DbUser, val wallet: DbWallet, val provider: DbProvider?)
@@ -217,7 +217,8 @@ class Backend(
             val fare = cat.recommendedFare + listOf(-100L, 0L, 100L, 200L).random()
             d = d.ensureFunds(cust.id, fare + 200).copy(lastBotRequestAt = t, bookings = d.bookings + DbBooking(
                 UUID.randomUUID().toString(), cust.id, null, cat.slug, ISSUES.getValue(cat.slug).random(), "pending", fare,
-                lat = HOME_LAT, lng = HOME_LNG, createdAt = t, expiresAt = t + 60_000, stepAt = t, byBot = true))
+                lat = hp.lat + 0.005, lng = hp.lng - 0.003, createdAt = t, expiresAt = t + 60_000, stepAt = t, byBot = true,
+                address = "Pinned location near you"))
         }
         return d
     }
@@ -278,7 +279,7 @@ class Backend(
             b.status == "completed" && ratings.none { it.bookingId == b.id && it.reviewer == meId },
             b.photo, b.cancelReason,
             b.offers.filter { it.status == "open" }.map { offerView(b, it) },
-            ((now - b.createdAt) / 1000).toInt(), b.fare - commission(b.fare),
+            ((now - b.createdAt) / 1000).toInt(), b.fare - commission(b.fare), b.address,
         )
     }
 
@@ -323,13 +324,15 @@ class Backend(
         d to b?.let { d.jobView(it, me) }
     }
 
-    override suspend fun createRequest(category: String, description: String, fare: Long): Unit = tx { d ->
+    override suspend fun createRequest(category: String, description: String, fare: Long, at: Place): Unit = tx { d ->
         if (mode() != ActiveMode.CUSTOMER) throw AppError("Switch to customer mode")
+        if (!at.inLahore) throw AppError("One Click works in Lahore for now. Choose a place in Lahore.")
         if (fare !in MIN_FARE..MAX_FARE) throw AppError("Fare must be ${rs(MIN_FARE)}–${rs(MAX_FARE)}")
         if (d.bookings.any { it.customerId == me && it.status in ACTIVE }) throw AppError("You already have an active request")
         if (d.wallet(me).balance < fare) throw AppError("Not enough in wallet. Top up first")
         val b = DbBooking(UUID.randomUUID().toString(), me, null, category, description.trim().take(200), "pending", fare,
-            lat = HOME_LAT, lng = HOME_LNG, createdAt = now, expiresAt = now + SEARCH_MS, stepAt = now)
+            lat = at.lat, lng = at.lng, createdAt = now, expiresAt = now + SEARCH_MS, stepAt = now,
+            address = at.address.trim().take(120).ifBlank { "Pinned location" })
         d.copy(bookings = d.bookings + b) to Unit
     }
 
@@ -368,6 +371,12 @@ class Backend(
         d.put(p.copy(isOnline = online)).copy(lastBotRequestAt = now - 7_000) to Unit
     }
 
+    override suspend fun updateLocation(lat: Double, lng: Double) = tx { d ->
+        if (mode() != ActiveMode.PROVIDER) throw AppError("Switch to provider mode")
+        if (lat !in 23.0..37.5 || lng !in 60.0..78.0) throw AppError("Location looks wrong")
+        d.put(d.provider(me).copy(lat = lat, lng = lng)) to Unit
+    }
+
     override suspend fun requests(): List<RequestView> = tx { d ->
         val p = d.providers.firstOrNull { it.userId == me }
         if (p == null || !p.isOnline || p.isOnJob) return@tx d to emptyList()
@@ -378,7 +387,7 @@ class Backend(
                 val mine = b.offers.lastOrNull { it.providerId == me }
                 RequestView(b.id, d.user(b.customerId).name, d.customerRating(b.customerId).first, b.category, b.description,
                     b.fare, round1(km(p.lat, p.lng, b.lat, b.lng)), ((now - b.createdAt) / 1000).toInt(),
-                    mine?.amount, mine?.status, mine?.let { max(0, ((it.expiresAt - now) / 1000).toInt()) } ?: 0)
+                    mine?.amount, mine?.status, mine?.let { max(0, ((it.expiresAt - now) / 1000).toInt()) } ?: 0, b.address)
             }
     }
 

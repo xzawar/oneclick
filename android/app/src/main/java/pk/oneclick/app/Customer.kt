@@ -1,6 +1,8 @@
 package pk.oneclick.app
 
 import android.graphics.BitmapFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
@@ -25,12 +27,14 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Calendar
 
@@ -217,6 +221,29 @@ fun BookFlow(s: UiState, vm: AppViewModel) {
     val back: () -> Unit = { if (step > first) step -= 1 else close() }
     val balance = s.me?.wallet?.balance ?: 0
     val cat = category
+    // Where: the phone's GPS fix when allowed and inside Lahore, else the saved home address.
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var place by remember { mutableStateOf(Place.HOME) }
+    var locating by remember { mutableStateOf(false) }
+    var gpsNote by remember { mutableStateOf<String?>(null) }
+    val locate: () -> Unit = {
+        locating = true; gpsNote = null
+        scope.launch {
+            val p = currentPlace(ctx)
+            locating = false
+            when {
+                p == null -> gpsNote = "We couldn’t find you. Check that location is on, or use your saved address."
+                !p.inLahore -> { place = Place.HOME; gpsNote = "One Click works in Lahore for now. We’ll use your saved address." }
+                else -> place = p
+            }
+        }
+    }
+    val askLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { r ->
+        if (r.values.any { it }) locate() else gpsNote = "Location is off for One Click, so we’ll use your saved address."
+    }
+    val useGps: () -> Unit = { if (hasLocationPermission(ctx)) locate() else if (!isJvmTest) askLocation.launch(LOCATION_PERMISSIONS) }
+    LaunchedEffect(Unit) { if (hasLocationPermission(ctx)) locate() }
 
     AnimatedContent(step, label = "book", transitionSpec = {
         (slideInHorizontally(tween(450, easing = Motion.enter)) { if (targetState > initialState) it else -it } + fadeIn(tween(300))) togetherWith
@@ -241,14 +268,23 @@ fun BookFlow(s: UiState, vm: AppViewModel) {
                 }
             }
             st == 2 -> FlowScreen(2, 4, "Where do you need them?", "Pros will come to this address.", back, close, footer = {
-                PillButton("Confirm address", { step = 3 })
+                PillButton("Confirm address", { step = 3 }, enabled = !locating)
             }) {
-                val nearby = s.mapProviders.filter { it.category == cat }
+                val nearby = s.mapProviders.filter { it.category == cat && Backend.km(it.lat, it.lng, place.lat, place.lng) <= 8 }
+                val here = LatLng(place.lat, place.lng)
+                val gps = place != Place.HOME
                 Box(Modifier.fillMaxWidth().height(260.dp).clip(Radius.xl)) {
-                    LahoreMap(listOf(Pin("you", HOME.latitude, HOME.longitude, PinKind.You)) +
-                        nearby.map { Pin(it.id, it.lat, it.lng, PinKind.Provider, it.category) }, Modifier.fillMaxSize(), HOME, "where", 14.8f)
+                    LahoreMap(listOf(Pin("you", here.latitude, here.longitude, PinKind.You)) +
+                        nearby.map { Pin(it.id, it.lat, it.lng, PinKind.Provider, it.category) }, Modifier.fillMaxSize(), here, place, 14.8f)
                 }
-                ListRow(Backend.HOME_ADDRESS, subtitle = "Your home", icon = Icons.Outlined.Place)
+                Column {
+                    ListRow("Use my current location", subtitle = when { locating -> "Finding you…"; gps -> place.address; else -> "Pros come to where you are now" },
+                        icon = Icons.Outlined.MyLocation, onClick = useGps,
+                        right = { if (gps && !locating) Icon(Icons.Outlined.CheckCircle, "Selected", tint = OC.positive) })
+                    ListRow(Backend.HOME_ADDRESS, subtitle = "Saved home", icon = Icons.Outlined.Home, onClick = { place = Place.HOME; gpsNote = null },
+                        right = { if (!gps) Icon(Icons.Outlined.CheckCircle, "Selected", tint = OC.positive) })
+                }
+                gpsNote?.let { Alert(it, Tone.Info) }
                 Alert(if (nearby.isEmpty()) "No ${categoryName(cat).lowercase()}s online near you right now. You can still send a request."
                     else "${nearby.size} ${categoryName(cat).lowercase()}${if (nearby.size > 1) "s are" else " is"} online near you.",
                     if (nearby.isEmpty()) Tone.Warn else Tone.Good)
@@ -256,7 +292,7 @@ fun BookFlow(s: UiState, vm: AppViewModel) {
             else -> {
                 val rec = recommended(cat)
                 FlowScreen(3, 4, "What do you want to pay?", "Pros can accept your price or send a counter-offer.", back, close, footer = {
-                    PillButton("Find pros", { vm.createRequest(cat, desc, fare) }, loading = s.busy, enabled = fare <= balance)
+                    PillButton("Find pros", { vm.createRequest(cat, desc, fare, place) }, loading = s.busy, enabled = fare <= balance)
                 }) {
                     Row(Modifier.fillMaxWidth().padding(vertical = Space.sm), verticalAlignment = Alignment.CenterVertically) {
                         IconCircle(Icons.Outlined.Remove, "Lower price", { fare = (fare - 50).coerceAtLeast(Backend.MIN_FARE) }, 48.dp)
@@ -278,7 +314,7 @@ fun BookFlow(s: UiState, vm: AppViewModel) {
                         ReceiptRow("You pay", rs(fare), strong = true)
                     }
                     Text("We hold your money safely and only pay the pro after you confirm the job is done.", style = T.defaultBody)
-                    if (fare > balance) Alert("Your balance is ${rs(balance)}. Add money to offer this price.", Tone.Bad, action = "Add money") { vm.open(null); vm.tab(Tab.Wallet) }
+                    if (fare > balance) Alert("Your balance is ${rs(balance)}. Add money to offer this price.", Tone.Bad, action = "Add money", onAction = { vm.open(null); vm.tab(Tab.Wallet) })
                 }
             }
         }
@@ -329,13 +365,14 @@ fun TrackPage(s: UiState, vm: AppViewModel) {
     if (job.needsRating) { SuccessScreen(job, vm); return }
     val searching = job.status == "pending"
     val onJob = job.status in ON_JOB
+    val you = LatLng(job.lat, job.lng)
     val pins = buildList {
-        add(Pin("you", HOME.latitude, HOME.longitude, PinKind.You))
+        add(Pin("you", you.latitude, you.longitude, PinKind.You))
         if (onJob) add(Pin("p", job.providerLat, job.providerLng, PinKind.Provider, job.category))
         else s.mapProviders.filter { it.category == job.category }.forEach { add(Pin(it.id, it.lat, it.lng, PinKind.Provider, it.category)) }
     }
-    val route = if (job.status in listOf("accepted", "en_route")) LatLng(job.providerLat, job.providerLng) to HOME else null
-    MapWithSheet(pins, HOME, job.status, route, searching, onBack = { vm.open(null) }) {
+    val route = if (job.status in listOf("accepted", "en_route")) LatLng(job.providerLat, job.providerLng) to you else null
+    MapWithSheet(pins, you, job.status, route, searching, onBack = { vm.open(null) }) {
         when {
             searching -> Searching(job, s, vm)
             job.status == "cancelled" -> {
@@ -429,6 +466,7 @@ private fun CustomerJob(job: JobView, s: UiState, vm: AppViewModel) {
         })
     Card {
         ReceiptRow("Job", categoryName(job.category) + if (job.description.isNotBlank()) " · ${job.description}" else "")
+        if (job.address.isNotBlank()) ReceiptRow("Where", job.address)
         ReceiptRow("Price", rs(job.fare))
         ReceiptRow("Payment", if (job.status == "disputed") "On hold" else "Held safely", valueColor = OC.positive)
     }

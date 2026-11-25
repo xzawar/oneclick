@@ -17,8 +17,8 @@ android {
         applicationId = "pk.oneclick.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 5
+        versionName = "0.5"
         buildConfigField("String", "API_BASE_URL", "\"https://diyipvjaxjkacwrszmda.supabase.co/functions/v1/api\"")
         buildConfigField("String", "MAPS_KEY", "\"${localProps.getProperty("MAPS_API_KEY", "")}\"")
     }
@@ -60,6 +60,7 @@ dependencies {
     implementation(platform("com.google.firebase:firebase-bom:35.2.0"))
     implementation("com.google.firebase:firebase-analytics")
     implementation("com.google.firebase:firebase-messaging")
+    implementation("com.google.android.gms:play-services-location:21.3.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("io.github.takahirom.roborazzi:roborazzi:1.32.2")

@@ -74,7 +74,7 @@ private class MapBridge(var onPin: (String) -> Unit) {
 
 /**
  * Real Google Map of Lahore (Google Maps JavaScript API in a WebView), in the calm One Click style.
- * [focusKey] changes re-centre on [focus]; [bottomPadding] keeps the focus above the sheet;
+ * [focusKey] changes re-centre on [focus] (or fit both ends of [route]); [bottomPadding] keeps the focus above the sheet;
  * [radar] pulses a search circle around [radarAt]. Pins glide to new positions.
  */
 @SuppressLint("SetJavaScriptEnabled")
@@ -142,7 +142,10 @@ window.update=function(s){if(!map)return;const seen={};
  if(s.route){if(!route)route=new google.maps.Polyline({map,strokeColor:'#0B3D2E',strokeWeight:5,strokeOpacity:.9});route.setPath(s.route)}
  else if(route){route.setMap(null);route=null}
  radarOn=s.radar;radarAt=s.radarAt||null;
- if(s.key!==lastKey||s.bottom!==lastBottom){lastKey=s.key;lastBottom=s.bottom;map.setZoom(s.zoom);map.setCenter(s.focus);const off=(s.bottom-72)/2;
+ if(s.key!==lastKey||s.bottom!==lastBottom){lastKey=s.key;lastBottom=s.bottom;
+ if(s.route){const b=new google.maps.LatLngBounds();b.extend(s.route[0]);b.extend(s.route[1]);
+  map.fitBounds(b,{top:96,left:56,right:56,bottom:s.bottom+32});google.maps.event.addListenerOnce(map,'idle',()=>{if(map.getZoom()>16)map.setZoom(16)});return}
+ map.setZoom(s.zoom);map.setCenter(s.focus);const off=(s.bottom-72)/2;
  if(off){if(map.getProjection())map.panBy(0,off);else google.maps.event.addListenerOnce(map,'idle',()=>map.panBy(0,off))}}};
 function init(){map=new google.maps.Map(document.getElementById('m'),{center:{lat:31.5204,lng:74.3587},zoom:15,disableDefaultUI:true,
  clickableIcons:false,gestureHandling:'greedy',styles:STYLE,minZoom:11,

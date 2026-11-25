@@ -48,3 +48,12 @@ Status: **DEFAULT** = chosen so work can proceed, owner may override. **ASK** = 
 - P1: Can a customer pay cash? Flow shows escrow only; schema has `payment_method`. DEFAULT: `wallet | cash`, cash skips escrow, triggers M7.
 - P2: Chat (Socket.io messages) exists in events but no F-number. DEFAULT: build with booking room (MVP).
 - P3: F36 live tracking is "High, month 1" but F30 safety needs live location now. DEFAULT: build tracking in Phase 4 (same pipeline).
+
+## Live location (demo build, Nov 2026)
+| # | Gap | DEFAULT |
+|---|---|---|
+| L1 | Service area not defined in spec | Requests must be inside the Lahore box 31.35–31.65 N, 74.15–74.5 E; else "One Click works in Lahore for now" |
+| L2 | When may a provider tap "I've arrived"? | Only within 300 m of the customer when the phone's fix is < 2 min old; no fresh fix → allowed. Simulated customers skip the check |
+| L3 | Provider location while idle vs on job | Foreground service (type location), fix every 20 s online, 5 s on a job; trail stored per booking in `locations` |
+| L4 | ETA formula | ceil(km × 3) min (≈ 20 km/h city traffic), min 1 |
+| L5 | Customer address | Phone GPS + Android reverse geocoder (street, area); saved "Gulberg III, Lahore" when location is off or outside Lahore |

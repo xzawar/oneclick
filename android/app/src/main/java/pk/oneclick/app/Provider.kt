@@ -31,6 +31,10 @@ fun ProviderHome(s: UiState, vm: AppViewModel) {
     val me = s.me ?: return
     val p = me.provider ?: return
     val job = s.job
+    val ctx = LocalContext.current
+    // Ask for location before going online; going online still works if they say no.
+    val askLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { vm.setOnline(true) }
+    val goOnline: () -> Unit = { if (isJvmTest || hasLocationPermission(ctx)) vm.setOnline(true) else askLocation.launch(LOCATION_PERMISSIONS) }
     Column(Modifier.fillMaxSize().background(OC.bg).verticalScroll(rememberScrollState()).statusBarsPadding()
         .padding(horizontal = Gap.gutter).padding(bottom = Space.xxl), verticalArrangement = Arrangement.spacedBy(Gap.component)) {
         HomeTop(me.user.name, vm, ring = true)
@@ -47,7 +51,7 @@ fun ProviderHome(s: UiState, vm: AppViewModel) {
             Spacer(Modifier.height(Space.sm))
             if (!p.isOnJob) {
                 if (p.isOnline) PillButton("Go offline", { vm.setOnline(false) }, kind = Btn.Secondary, loading = s.busy)
-                else PillButton("Go online", { vm.setOnline(true) }, icon = Icons.Outlined.PowerSettingsNew, loading = s.busy,
+                else PillButton("Go online", goOnline, icon = Icons.Outlined.PowerSettingsNew, loading = s.busy,
                     enabled = me.wallet.balance >= Backend.MIN_BALANCE)
             }
         }
@@ -57,7 +61,8 @@ fun ProviderHome(s: UiState, vm: AppViewModel) {
             Stat("Jobs done", "${p.totalJobs}", Modifier.weight(1f))
         }
         if (me.wallet.balance < Backend.MIN_BALANCE) Alert("Keep at least ${rs(Backend.MIN_BALANCE)} in your wallet to get requests.", Tone.Warn,
-            action = "Add money") { vm.tab(Tab.Wallet) }
+            action = "Add money", onAction = { vm.tab(Tab.Wallet) })
+        if (online && !s.locationOk) Alert("Turn on location so customers can see you coming.", Tone.Warn, action = "Turn on", onAction = { askLocation.launch(LOCATION_PERMISSIONS) })
         job?.let { ActiveBookingCard(it) { vm.open(Page.Track) } }
 
         if (job == null || job.status !in ON_JOB) {
@@ -102,7 +107,7 @@ private fun RequestCard(r: RequestView, best: Boolean, busy: Boolean, onOffer: (
             }
             Text(rs(r.fare), style = T.bodyTitle)
         }
-        ListRow("${categoryName(r.category)} · ${r.description}", subtitle = "${Backend.HOME_ADDRESS} · ${r.distanceKm} km away", icon = categoryIcon(r.category))
+        ListRow("${categoryName(r.category)} · ${r.description}", subtitle = "${r.address.ifBlank { "Pinned location" }} · ${r.distanceKm} km away", icon = categoryIcon(r.category))
         when (r.myOfferStatus) {
             "open" -> {
                 Alert("You offered ${rs(r.myOffer ?: 0)}. Waiting for ${firstName(r.customerName)} to choose.", Tone.Info)
@@ -169,7 +174,7 @@ private fun ProviderJob(job: JobView, s: UiState, vm: AppViewModel) {
         if (job.etaMin != null && job.status == "en_route") Text("About ${job.etaMin} min to go", style = T.defaultBody)
     }
     Text(title, style = T.subsectionTitle)
-    ListRow(job.otherName, subtitle = "★ ${job.otherRating} · ${Backend.HOME_ADDRESS} · ${job.distanceKm} km", left = { Avatar(job.otherName, 48.dp) },
+    ListRow(job.otherName, subtitle = "★ ${job.otherRating} · ${job.address.ifBlank { "Pinned location" }} · ${job.distanceKm} km", left = { Avatar(job.otherName, 48.dp) },
         right = { IconCircle(Icons.Outlined.Call, "Call $name", { vm.toast("In-app calls come with the Agora setup") }) })
     Card {
         ReceiptRow("Job", categoryName(job.category) + if (job.description.isNotBlank()) " · ${job.description}" else "")

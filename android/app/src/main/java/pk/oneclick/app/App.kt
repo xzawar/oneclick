@@ -290,7 +290,7 @@ fun WalletTab(s: UiState, vm: AppViewModel) {
                 if (provider) ActionButton(Icons.Outlined.NorthEast, "Withdraw", { withdraw = true })
                 ActionButton(Icons.Outlined.EventNote, if (provider) "Jobs" else "Bookings", { vm.tab(Tab.Bookings) })
             }
-            if (provider && (w?.balance ?: 0) < Backend.MIN_BALANCE) Alert("Keep at least ${rs(Backend.MIN_BALANCE)} to get requests.", Tone.Warn, action = "Add money") { topup = true }
+            if (provider && (w?.balance ?: 0) < Backend.MIN_BALANCE) Alert("Keep at least ${rs(Backend.MIN_BALANCE)} to get requests.", Tone.Warn, action = "Add money", onAction = { topup = true })
             Header("Activity")
             if (s.txns.isEmpty()) Text("Your payments will show up here.", style = T.defaultBody)
             Column {

@@ -81,6 +81,8 @@ data class UiState(
     val local: Boolean = false,
     val dismissed: Set<String> = emptySet(),
     val bookCategory: String? = null,
+    /** Provider allowed One Click to use the phone's location (so customers see them coming). */
+    val locationOk: Boolean = true,
     val message: String? = null,
     val busy: Boolean = false,
 )
@@ -124,6 +126,7 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
 
     fun switchAccount(id: String) {
         val u = session.profiles.firstOrNull { it.user.id == id }?.user ?: return
+        Tracking.sync(app, on = false, fast = false)
         session.userId = u.id
         session.mode = if (u.role == "provider") ActiveMode.PROVIDER else ActiveMode.CUSTOMER
         _s.update { it.copy(tab = Tab.Home, page = null, job = null, requests = emptyList(), me = null) }
@@ -133,6 +136,7 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
 
     fun signOut() {
         poller?.cancel()
+        Tracking.sync(app, on = false, fast = false)
         val left = session.accounts - (session.userId ?: "")
         session.profiles = session.profiles.filter { it.user.id != session.userId }
         session.accounts = left
@@ -167,6 +171,10 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
             _s.update { it.copy(me = me, job = job, requests = req) }
         } else _s.update { it.copy(me = me, job = job, mapProviders = api.mapProviders()) }
         notifyJob(job)
+        // Share the provider's GPS while online or on a job (every 5 s on a job, 20 s otherwise).
+        val p = me.provider
+        Tracking.sync(app, on = session.mode == ActiveMode.PROVIDER && p != null && (p.isOnline || p.isOnJob), fast = job?.status in ON_JOB)
+        _s.update { it.copy(locationOk = isJvmTest || hasLocationPermission(app)) }
         // A provider whose offer was just accepted goes straight to the job screen.
         if (session.mode == ActiveMode.PROVIDER && job != null && job.status == "accepted" && prevJob?.id != job.id && _s.value.page == null)
             _s.update { it.copy(page = Page.Track) }
@@ -232,8 +240,8 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
     fun dismiss(id: String) { session.dismissed = session.dismissed + id; _s.update { it.copy(dismissed = session.dismissed) } }
 
     // ---------- customer ----------
-    fun createRequest(category: String, description: String, fare: Long) = op {
-        api.createRequest(category, description, fare)
+    fun createRequest(category: String, description: String, fare: Long, at: Place = Place.HOME) = op {
+        api.createRequest(category, description, fare, at)
         _s.update { it.copy(page = Page.Track) }
     }
     fun raiseFare(newFare: Long) = job { api.raiseFare(it, newFare); toast("Fare raised to ${rs(newFare)}") }

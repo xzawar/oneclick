@@ -24,6 +24,13 @@ import java.util.concurrent.TimeUnit
 
 @Serializable data class SignedIn(val user: DbUser, val token: String)
 
+/** Where the customer needs the pro: a GPS fix (or the saved home) plus a short street address. */
+data class Place(val lat: Double, val lng: Double, val address: String) {
+    /** Same box the server checks: One Click serves Lahore only for now. */
+    val inLahore get() = lat in 31.35..31.65 && lng in 74.15..74.5
+    companion object { val HOME = Place(Backend.HOME_LAT, Backend.HOME_LNG, Backend.HOME_ADDRESS) }
+}
+
 /** Everything the screens need. [Backend] runs on the phone (tests); [RemoteApi] talks to the live server. */
 interface Api {
     suspend fun lookup(phone: String): DbUser?
@@ -31,13 +38,15 @@ interface Api {
     suspend fun me(): Me
     suspend fun mapProviders(): List<MapProvider>
     suspend fun activeJob(): JobView?
-    suspend fun createRequest(category: String, description: String, fare: Long)
+    suspend fun createRequest(category: String, description: String, fare: Long, at: Place = Place.HOME)
     suspend fun raiseFare(id: String, newFare: Long)
     suspend fun acceptOffer(id: String, offerId: String)
     suspend fun declineOffer(id: String, offerId: String)
     suspend fun cancel(id: String)
     suspend fun setOnline(online: Boolean)
     suspend fun requests(): List<RequestView>
+    /** Provider's phone GPS fix, sent while online or on a job. */
+    suspend fun updateLocation(lat: Double, lng: Double)
     suspend fun makeOffer(id: String, amount: Long)
     suspend fun advance(id: String, next: String)
     suspend fun complete(id: String, photoPath: String)
@@ -91,14 +100,18 @@ class RemoteApi(
     override suspend fun me() = get("/me", Me.serializer())
     override suspend fun mapProviders() = get("/map-providers", ListSerializer(MapProvider.serializer()))
     override suspend fun activeJob() = get("/job", JobRes.serializer()).job
-    override suspend fun createRequest(category: String, description: String, fare: Long) =
-        post("/requests", buildJsonObject { put("category", category); put("description", description); put("fare", fare) })
+    override suspend fun createRequest(category: String, description: String, fare: Long, at: Place) =
+        post("/requests", buildJsonObject {
+            put("category", category); put("description", description); put("fare", fare)
+            put("lat", at.lat); put("lng", at.lng); put("address", at.address)
+        })
     override suspend fun raiseFare(id: String, newFare: Long) = post("/bookings/$id/raise", buildJsonObject { put("fare", newFare) })
     override suspend fun acceptOffer(id: String, offerId: String) = post("/bookings/$id/accept-offer", buildJsonObject { put("offerId", offerId) })
     override suspend fun declineOffer(id: String, offerId: String) = post("/bookings/$id/decline-offer", buildJsonObject { put("offerId", offerId) })
     override suspend fun cancel(id: String) = post("/bookings/$id/cancel")
     override suspend fun setOnline(online: Boolean) { call("PUT", "/online", buildJsonObject { put("online", online) }) }
     override suspend fun requests() = get("/requests", ListSerializer(RequestView.serializer()))
+    override suspend fun updateLocation(lat: Double, lng: Double) { call("PUT", "/location", buildJsonObject { put("lat", lat); put("lng", lng) }) }
     override suspend fun makeOffer(id: String, amount: Long) = post("/bookings/$id/offer", buildJsonObject { put("amount", amount) })
     override suspend fun advance(id: String, next: String) = post("/bookings/$id/advance", buildJsonObject { put("status", next) })
     override suspend fun complete(id: String, photoPath: String) {
