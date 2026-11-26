@@ -448,7 +448,7 @@ fun AboutPage(vm: AppViewModel) {
             Spacer(Modifier.height(Space.sm))
             Text("One Click", style = T.screenTitle)
             Text("Home services in Lahore", style = T.largeBody)
-            Badge("Version 0.4", Tone.Neutral)
+            Badge("Version 0.5.1", Tone.Neutral)
         }
         Column {
             ListRow("Made in Lahore", subtitle = "Gulberg · DHA · Johar Town", icon = Icons.Outlined.Place)
